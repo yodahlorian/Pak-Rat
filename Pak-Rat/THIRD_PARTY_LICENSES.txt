@@ -1,0 +1,82 @@
+Pak Rat — Third-Party Licenses
+==============================
+
+Pak Rat is built on the following third-party open-source components. Their
+copyright notices and licenses are reproduced/referenced below in full, as
+each license requires. Nothing here is removed or altered.
+
+--------------------------------------------------------------------
+1. PySide6 (Qt for Python)
+   Copyright (c) The Qt Company Ltd.
+   License: GNU Lesser General Public License, version 3 (LGPLv3)
+   Project:  https://www.qt.io/qt-for-python
+   License:  https://www.gnu.org/licenses/lgpl-3.0.html
+
+   The Qt libraries are dynamically linked (PyInstaller onedir layout — the Qt
+   binaries live in _internal and can be replaced), satisfying LGPLv3 §4.
+--------------------------------------------------------------------
+2. UE4-DDS-Tools — UE texture (de)serialization + DDS injection engine
+   (vendored under vendor/injector/, incl. its bundled CPython runtime)
+   Project:  https://github.com/matyalatte/UE4-DDS-Tools
+
+   MIT License
+
+   Copyright (c) 2022-2023 matyalatte
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+--------------------------------------------------------------------
+3. DirectXTex / texconv — DDS block-compression encode/decode + mip generation
+   (vendored as vendor/injector/src/directx/texconv.dll, via UE4-DDS-Tools'
+   Texconv-Custom-DLL build: https://github.com/matyalatte/Texconv-Custom-DLL)
+   Project:  https://github.com/microsoft/DirectXTex
+
+   MIT License
+
+   Copyright (c) Microsoft Corporation.
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+--------------------------------------------------------------------
+4. repak — .pak read/unpack/pack (vendored as vendor/repak.exe)
+   License: MIT OR Apache-2.0
+   Project:  https://github.com/trumank/repak
+
+   Used unmodified as a bundled executable. See the project for full license
+   text (MIT or Apache-2.0, at your option).
+--------------------------------------------------------------------
+5. CPython — bundled runtime for the injection engine (vendor/injector/python/)
+   Copyright (c) Python Software Foundation
+   License: PSF License Agreement
+   Project:  https://www.python.org
+--------------------------------------------------------------------
