@@ -17,6 +17,11 @@ oo2core_*.dll
 # ── Bulky generated data we don't ship in source ────────────────────────
 Pak-Rat/data/assets.txt
 
+# ── Internal docs & stray branding — kept local, out of the public package ─
+/V2_BACKLOG.md
+/Pak-Rat/DESIGN_NOTES.md
+/pak-rat_transparent.png
+
 # ── Python caches ───────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
