@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 1.0.1**
+**Version 1.0.2**
 
 **Automatic asset packager for Retro Rewind (UE 5.4).**
 
@@ -94,23 +94,31 @@ When the `.pak` is built, name it, then choose:
 
 ## Building from source
 
-The Python sources, the PyInstaller `.spec`, and the dropdown data are in this
-repo. The bundled third-party tooling is **not** committed (it's in the release
-archive) — to build the exe yourself, place these under `Pak-Rat/vendor/`:
+This repo is the complete, single source — sources, PyInstaller `.spec`, data,
+and all redistributable tooling under `Pak-Rat/vendor/` (repak, the *UE4-DDS-
+Tools* injector + its embedded Python 3.10, and `texconv.dll`, all MIT/Apache).
 
-- **repak** (`repak.exe`) — pak (un)packer.
-- **injector** — a build of Matyalatte's *UE4-DDS-Tools* with its own embedded
-  Python 3.10 (`vendor/injector/python/`) and `texconv.dll`.
-- **Oodle** (`oo2core_9_win64.dll`) — required to read the game's pak. This is
-  proprietary (RAD/Epic) and is **not redistributed here**; copy it from your
-  own Retro Rewind / UE install.
+```
+pip install pyinstaller PySide6 pillow
+pyinstaller Pak-Rat.spec --noconfirm
+```
 
-Then: `pip install pyinstaller PySide6 pillow` and
-`pyinstaller Pak-Rat.spec --noconfirm`.
+**Oodle is the one thing not in the box.** `oo2core_*.dll` is proprietary
+(RAD/Epic) and is never committed or shipped. Pak Rat obtains it on the user's
+own machine the first time it runs — copied from the installed Retro Rewind / UE
+game (which ships it), or downloaded by repak from Epic's official OodleUE
+distribution. See `core.ensure_oodle()`.
 
 ---
 
 ## Changelog
+
+### 1.0.2
+- **Oodle is no longer bundled.** `oo2core` is proprietary (RAD/Epic) and can't
+  be redistributed, so Pak Rat now copies it from your own Steam install of the
+  game on first run. The download is smaller and clean — no shipped DLL to trip
+  antivirus.
+- More robust Steam-install discovery (finds `SteamLibrary` on any drive).
 
 ### 1.0.1
 - Added **Extract Texture** mode — pull an original texture out of the game as

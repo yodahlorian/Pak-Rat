@@ -80,3 +80,15 @@ each license requires. Nothing here is removed or altered.
    License: PSF License Agreement
    Project:  https://www.python.org
 --------------------------------------------------------------------
+6. Oodle Data Compression — NOT bundled / NOT redistributed
+   Copyright (c) Epic Games Tools LLC (RAD Game Tools)
+   License: Proprietary (Unreal Engine EULA)
+
+   Pak Rat does NOT ship oo2core_*.dll. Oodle is proprietary and cannot be
+   redistributed. It is required only to read the game's Oodle-compressed pak,
+   and it is obtained on the user's own machine at first run: copied from the
+   user's installed Unreal / Retro Rewind game (which legitimately ships it),
+   or, failing that, downloaded by repak from Epic's official OodleUE
+   distribution. No Oodle binary exists in this source tree or the release
+   archive.
+--------------------------------------------------------------------

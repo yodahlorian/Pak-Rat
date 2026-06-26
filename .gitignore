@@ -8,13 +8,10 @@
 # ── Release archives — host these as GitHub Release assets, not in-tree ──
 *.zip
 
-# ── Third-party tooling — NOT shipped in source ─────────────────────────
-# repak, texconv, the injector's bundled Python, and especially the
-# proprietary Oodle DLL (oo2core_*.dll, RAD/Epic — not redistributable).
-# The working copies live inside the release archive; see README "Building"
-# for how to obtain them when building from source.
-/vendor/
-Pak-Rat/vendor/
+# ── Proprietary: Oodle is NEVER committed (RAD/Epic, non-redistributable) ─
+# Everything else in vendor/ (repak, injector, texconv — all MIT/Apache) IS
+# committed so this repo is the single clone-and-build source. Oodle is
+# fetched on the user's own machine at first run; see core.ensure_oodle().
 oo2core_*.dll
 
 # ── Bulky generated data we don't ship in source ────────────────────────

@@ -80,17 +80,25 @@ VALID_MESH_EXTS = {".uasset", ".fbx"}  # placeholder — confirm at step 4
 # Game install discovery (base pak + ~mods)
 # ---------------------------------------------------------------------------
 def _rr_paks_dir() -> Path:
-    cands = [
-        r"D:\SteamLibrary\steamapps\common\RetroRewind\RetroRewind\Content\Paks",
-        str(Path(os.path.expanduser("~"))
-            / r"Documents\RR\Game\RetroRewind\RetroRewind\Content\Paks"),
-    ]
-    for c in cands:
-        if (Path(c) / "RetroRewind-Windows.pak").is_file():
-            return Path(c)
+    """Locate the official Steam install's Paks folder.
+
+    Steam can live on any drive (default under Program Files, or a SteamLibrary
+    on another drive), so we probe the common roots. We deliberately do NOT look
+    anywhere else — no Documents/dev folders — so the app only ever reads a
+    legitimately installed copy of the game.
+    """
+    rel = r"steamapps\common\RetroRewind\RetroRewind\Content\Paks"
+    roots = [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"]
+    for drive in "CDEFGH":
+        roots.append(rf"{drive}:\SteamLibrary")
+        roots.append(rf"{drive}:\Steam")
+    for r in roots:
+        p = Path(r) / rel
+        if (p / "RetroRewind-Windows.pak").is_file():
+            return p
     raise RuntimeError(
-        "Retro Rewind install not found. Looked for RetroRewind-Windows.pak under "
-        "the Steam library and Documents\\RR.")
+        "Retro Rewind (Steam) install not found. Looked for "
+        "RetroRewind-Windows.pak under the standard Steam library locations.")
 
 
 def base_pak() -> Path:
@@ -125,6 +133,59 @@ def _injector(args: list[str]) -> subprocess.CompletedProcess:
     if r.returncode != 0:
         raise RuntimeError(f"injector failed: {r.stderr or r.stdout}")
     return r
+
+
+# ---------------------------------------------------------------------------
+# Oodle — fetched at first run, never shipped (proprietary, non-redistributable)
+# ---------------------------------------------------------------------------
+OODLE_DLL = "oo2core_9_win64.dll"
+
+
+def _oodle_dst() -> Path:
+    """Where repak looks for Oodle: next to repak.exe in the vendor dir."""
+    return REPAK().parent / OODLE_DLL
+
+
+def ensure_oodle() -> str:
+    """Guarantee repak can find Oodle without us redistributing it.
+
+    Oodle (RAD/Epic) is proprietary and is deliberately NOT bundled — keeping the
+    download small and clean (no shipped binary to trip AV). On the first run we
+    copy oo2core out of the user's own Steam install of the game (UE ships it in
+    Binaries\\Win64) and cache it next to repak.exe. We only ever read the Steam
+    install resolved by _rr_paks_dir(). Idempotent. Returns the path, or ''.
+    """
+    dst = _oodle_dst()
+    if dst.is_file():
+        return str(dst)
+    try:
+        paks = _rr_paks_dir()   # Steam install only
+    except Exception:
+        return ""
+    # oo2core ships in the game's Binaries\Win64 — project or engine side.
+    cands = []
+    if len(paks.parents) > 1:
+        cands.append(paks.parents[1] / "Binaries" / "Win64" / OODLE_DLL)
+    if len(paks.parents) > 2:
+        cands.append(paks.parents[2] / "Engine" / "Binaries" / "Win64" / OODLE_DLL)
+    # bounded fallback: scan the game root once
+    root = paks.parents[2] if len(paks.parents) > 2 else paks
+
+    def _place(src: Path) -> str:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        return str(dst)
+
+    for c in cands:
+        if c.is_file():
+            return _place(c)
+    try:
+        for c in Path(root).rglob(OODLE_DLL):
+            if c.is_file():
+                return _place(c)
+    except Exception:
+        pass
+    return ""  # not found in the Steam install — repak will report it can't read
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +245,7 @@ def prepare_target(asset: str) -> TargetSpec:
     Raises on any failure so the wizard can block the advance.
     """
     asset = asset.strip().rstrip("/")
+    ensure_oodle()  # base pak is Oodle-compressed; make sure repak can read it
     work = Path(tempfile.mkdtemp(prefix="pakrat_"))
     unpacked = work / "unpacked"
 
@@ -355,6 +417,7 @@ def _pak_entries() -> set:
     sidecars (uasset/uexp/ubulk) actually exist for an asset."""
     global _pak_entry_cache
     if _pak_entry_cache is None:
+        ensure_oodle()
         r = _repak("list", str(base_pak()))
         _pak_entry_cache = {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
     return _pak_entry_cache
@@ -422,6 +485,7 @@ def resolve_overlay_textures(mesh: str) -> list[str]:
     """Light walk for Dropdown 2: the base-colour (_bc) textures the mesh's
     materials use. Returns sorted mount paths."""
     mesh = mesh.strip().rstrip("/")
+    ensure_oodle()
     with tempfile.TemporaryDirectory() as tmp:
         ua = _extract_asset(mesh, tmp)
         if not ua:
@@ -463,6 +527,7 @@ def prepare_mesh(mesh: str) -> MeshPlan:
     """Full dependency walk for the selected mesh: extract vanilla of every
     required asset, classify, decode texture previews. Raises on failure."""
     mesh = mesh.strip().rstrip("/")
+    ensure_oodle()
     work = Path(tempfile.mkdtemp(prefix="pakrat_mesh_"))
     van = work / "vanilla"
     required: list[RequiredFile] = []
