@@ -318,6 +318,68 @@ def export_texture(spec: "TargetSpec", dest_path: str, fmt: str = "png") -> str:
     return str(dest)
 
 
+# Texture suffix family — picking T_X_bc should offer T_X_n, T_X_ram, …
+_TEX_SUFFIX = re.compile(
+    r'_(bc|n|ram|d|m|r|ao|e|orm|mask|h|s|emi|rough|metal|spec|opacity)$', re.I)
+
+
+def related_textures(asset: str, limit: int = 16) -> list[str]:
+    """Sibling textures of the same material set (same folder + shared stem,
+    different suffix). e.g. T_Toy_RubixCube_A_01_bc -> …_n, …_ram.
+
+    Scans the base pak's entry list. Returns mount paths (no ext), excluding the
+    input. Empty on any failure.
+    """
+    asset = asset.strip().rstrip("/")
+    out, seen = [], {asset}
+    try:
+        leaf = asset.rsplit("/", 1)[-1]
+        folder = asset.rsplit("/", 1)[0]
+        stem = _TEX_SUFFIX.sub("", leaf)
+        if stem == leaf or not stem:
+            return []  # no recognizable suffix to group on
+        for e in _pak_entries():
+            if not e.endswith(".uasset"):
+                continue
+            m = e[:-7]
+            if m in seen:
+                continue
+            ml = m.rsplit("/", 1)[-1]
+            if m.rsplit("/", 1)[0] == folder and ml.startswith(stem + "_") \
+                    and _classify(m) == "texture":
+                seen.add(m)
+                out.append(m)
+    except Exception:
+        return out[:limit]
+    return sorted(out)[:limit]
+
+
+def export_many(assets: list[str], dest_dir: str, fmt: str = "png",
+                progress=None) -> list[str]:
+    """Extract + decode several textures to dest_dir/<leaf>.<fmt>.
+
+    Returns the written paths. Skips (doesn't abort on) any single failure so one
+    bad asset can't sink the batch; reports failures via progress.
+    """
+    written = []
+    Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    for i, asset in enumerate(assets, 1):
+        leaf = asset.rstrip("/").split("/")[-1]
+        if progress:
+            progress(f"Extracting {leaf}  ({i}/{len(assets)})…")
+        spec = None
+        try:
+            spec = prepare_target(asset)
+            out = export_texture(spec, str(Path(dest_dir) / f"{leaf}.{fmt}"), fmt)
+            written.append(out)
+        except Exception as e:  # noqa: BLE001
+            if progress:
+                progress(f"  ! skipped {leaf}: {e}")
+        finally:
+            cleanup_target(spec)
+    return written
+
+
 # ---------------------------------------------------------------------------
 # Replacement image validation + prep
 # ---------------------------------------------------------------------------

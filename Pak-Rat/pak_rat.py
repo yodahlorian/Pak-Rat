@@ -1,16 +1,17 @@
 """
-Pak Rat — automatic asset packager for Retro Rewind (UE 5.4).
+Pak Rat — automatic asset packager + cooker for Retro Rewind (UE 5.4).
 
-Proof-of-concept GUI: an installer-style QWizard. All real injection/packaging
-is stubbed in core.py behind clean seams; this file is pure UI + flow.
+Installer-style QWizard. Real injection/packaging lives in core.py; the UE
+cooking toolchain lives in cook.py. This file is pure UI + flow.
 
-Flow:
-  ModePage → AssetPage → ExtractPage → ImagePage → [MeshPage] → ProcessPage → FinishPage
-  (MeshPage only when "Mesh + Texture" is chosen)
-  Extract mode short-circuits: ModePage → AssetPage → ExtractPage → ExportPage
-  (hands the user the decoded original texture; no packaging).
+Four modes (chosen on ModePage):
+  regular  ModePage → AssetPage → ExtractPage → ImagePage → ProcessPage → FinishPage
+  mesh     ModePage → AssetPage → ExtractPage → RequiredFilesPage → ProcessPage → FinishPage
+  cook     ModePage → [SetupPage] → AssetPage → CookListPage → ProcessPage → FinishPage
+  extract  ModePage → AssetPage → ExtractListPage  (hands back originals; no packaging)
+  (SetupPage only on first cook run; cook mode shown only when an Unreal install is found.)
 
-Run (Windows):  python.exe src/pak_rat.py
+Run (Windows):  python.exe pak_rat.py
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QCompleter, QFileDialog,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QMessageBox, QProgressBar, QPushButton,
     QRadioButton, QScrollArea, QSplashScreen, QVBoxLayout, QWidget, QWizard,
     QWizardPage,
@@ -29,12 +30,15 @@ from PySide6.QtWidgets import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
+import cook  # noqa: E402  (v2 UE cooking toolchain)
 
 # Page ids
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_IMAGE, PAGE_REQUIRED, PAGE_PROCESS, \
-    PAGE_FINISH, PAGE_EXPORT = range(8)
+    PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, \
+    PAGE_EXTRACTLIST = range(10)
 
 GREEN = "#2e9e44"
+APP_VERSION = "2.0.0"
 
 
 def resource_path(name: str) -> str:
@@ -59,6 +63,7 @@ class ModePage(QWizardPage):
 
         self.rb_regular = QRadioButton("Regular Texture")
         self.rb_mesh = QRadioButton("Mesh + Texture")
+        self.rb_cook = QRadioButton("Cook Mesh from a 3D file  (FBX / OBJ / glTF / …)")
         self.rb_extract = QRadioButton("Extract Texture")
         self.rb_regular.setChecked(True)
 
@@ -66,6 +71,7 @@ class ModePage(QWizardPage):
         self.group.addButton(self.rb_regular, 0)
         self.group.addButton(self.rb_mesh, 1)
         self.group.addButton(self.rb_extract, 2)
+        self.group.addButton(self.rb_cook, 3)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.rb_regular)
@@ -74,9 +80,16 @@ class ModePage(QWizardPage):
         lay.addWidget(lab1)
         lay.addSpacing(12)
         lay.addWidget(self.rb_mesh)
-        lab2 = QLabel("    Swap a mesh and its texture together.")
+        lab2 = QLabel("    Swap an already-cooked mesh and its texture together.")
         lab2.setStyleSheet("color:#888;")
         lay.addWidget(lab2)
+        lay.addSpacing(12)
+        # Cooker — only meaningful when an Unreal Engine install is present.
+        lay.addWidget(self.rb_cook)
+        self.cook_lab = QLabel("    Bring your own model (any common 3D format) — "
+                               "Pak Rat cooks it with Unreal for you.")
+        self.cook_lab.setStyleSheet("color:#888;")
+        lay.addWidget(self.cook_lab)
         lay.addSpacing(12)
         lay.addWidget(self.rb_extract)
         lab3 = QLabel("    Pull an original texture out of the game to edit (PNG/DDS).")
@@ -86,17 +99,30 @@ class ModePage(QWizardPage):
 
     def initializePage(self):
         self.wizard().mode = "regular"
+        # The cooker needs an installed Unreal Engine; hide it otherwise.
+        avail = getattr(self.wizard(), "cook_available", None)
+        if avail is None:
+            avail = cook.ue_available()
+            self.wizard().cook_available = avail
+        self.rb_cook.setVisible(avail)
+        self.cook_lab.setVisible(avail)
+        if not avail and self.rb_cook.isChecked():
+            self.rb_regular.setChecked(True)
         self.group.idToggled.connect(self._on_toggle)
 
     def _on_toggle(self, _id, checked):
         if self.rb_mesh.isChecked():
             self.wizard().mode = "mesh"
+        elif self.rb_cook.isChecked():
+            self.wizard().mode = "cook"
         elif self.rb_extract.isChecked():
             self.wizard().mode = "extract"
         else:
             self.wizard().mode = "regular"
 
     def nextId(self):
+        if getattr(self.wizard(), "mode", "regular") == "cook":
+            return PAGE_ASSET if cook.is_ready() else PAGE_SETUP
         return PAGE_ASSET
 
 
@@ -143,10 +169,11 @@ class AssetPage(QWizardPage):
         return getattr(self.wizard(), "mode", "regular") == "mesh"
 
     def initializePage(self):
-        mesh = self._is_mesh()
-        items = core.load_meshes() if mesh else core.load_assets()
+        mode = getattr(self.wizard(), "mode", "regular")
+        mesh_like = mode in ("mesh", "cook")
+        items = core.load_meshes() if mesh_like else core.load_assets()
         self._resolved_for = None
-        self._mesh_set = set(items) if mesh else set()
+        self._mesh_set = set(items) if mode == "mesh" else set()
         self.combo.clear()
         self.combo.addItems(items)
         self.combo.setCurrentIndex(-1)
@@ -157,13 +184,17 @@ class AssetPage(QWizardPage):
         completer.setCompletionMode(QCompleter.PopupCompletion)
         self.combo.setCompleter(completer)
 
+        show_overlay = (mode == "mesh")  # cook mode reuses the game's own material
         self.combo2.clear()
-        self.tex_lbl.setVisible(mesh)
-        self.combo2.setVisible(mesh)
-        if mesh:
+        self.tex_lbl.setVisible(show_overlay)
+        self.combo2.setVisible(show_overlay)
+        if mode == "cook":
+            self.setTitle("Select the mesh to replace")
+            self.setSubTitle("Pick the game mesh your model will stand in for.")
+        elif mode == "mesh":
             self.setTitle("Select the mesh")
             self.setSubTitle("Pick the mesh, then its overlay texture.")
-        elif getattr(self.wizard(), "mode", "regular") == "extract":
+        elif mode == "extract":
             self.setTitle("Select the texture to extract")
             self.setSubTitle("Pick the texture you want to pull out of the game.")
         else:
@@ -198,6 +229,11 @@ class AssetPage(QWizardPage):
         return True
 
     def nextId(self):
+        mode = getattr(self.wizard(), "mode", "regular")
+        if mode == "cook":
+            return PAGE_COOKINPUT
+        if mode == "extract":
+            return PAGE_EXTRACTLIST
         return PAGE_EXTRACT
 
 
@@ -282,8 +318,6 @@ class ExtractPage(QWizardPage):
 
     def nextId(self):
         mode = getattr(self.wizard(), "mode", "regular")
-        if mode == "extract":
-            return PAGE_EXPORT
         if mode == "mesh":
             return PAGE_REQUIRED
         return PAGE_IMAGE
@@ -476,24 +510,257 @@ class RequiredFilesPage(QWizardPage):
 
 
 # ---------------------------------------------------------------------------
-# Process page — spinner while the (stubbed) pipeline runs
+# First-run setup page (cook mode) — download Blender + build the cook project
+# with a real progress bar so the user isn't left wondering.
+# ---------------------------------------------------------------------------
+class SetupWorker(QThread):
+    progress = Signal(str, int)   # (message, percent)  percent<0 == indeterminate
+    done = Signal(object)         # cook.CookEnv
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            env = cook.setup(progress=lambda m, p=None:
+                             self.progress.emit(m, -1 if p is None else int(p)))
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+        else:
+            self.done.emit(env)
+
+
+class SetupPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("One-time cooking setup")
+        self.setSubTitle("Getting the cooker ready — this happens only once.")
+        self._done = False
+        self.worker = None
+
+        self.info = QLabel("")
+        self.info.setWordWrap(True)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)
+        self.status = QLabel("Starting…")
+        self.status.setWordWrap(True)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.info)
+        lay.addStretch(1)
+        lay.addWidget(self.status)
+        lay.addWidget(self.bar)
+        lay.addStretch(1)
+
+    def initializePage(self):
+        self._done = False
+        self.completeChanged.emit()
+        wiz = self.wizard()
+        ue = cook.pick_ue()
+        ue_txt = (f"Found Unreal Engine {ue['version']}." if ue
+                  else "No Unreal Engine found.")
+        self.info.setText(
+            f"{ue_txt}\n\nPak Rat will download a portable Blender (~370 MB) and "
+            "build a small cooking project. Nothing is installed system-wide; it "
+            "all lives in your user folder and is reused next time.")
+        wiz.button(QWizard.BackButton).setEnabled(False)
+        wiz.button(QWizard.NextButton).setEnabled(False)
+        self.worker = SetupWorker()
+        self.worker.progress.connect(self._on_progress)
+        self.worker.done.connect(self._on_done)
+        self.worker.failed.connect(self._on_error)
+        self.worker.start()
+
+    def _on_progress(self, msg, pct):
+        self.status.setText(msg)
+        if pct < 0:
+            self.bar.setRange(0, 0)            # indeterminate
+        else:
+            self.bar.setRange(0, 100)
+            self.bar.setValue(pct)
+
+    def _on_done(self, _env):
+        wiz = self.wizard()
+        wiz.button(QWizard.BackButton).setEnabled(True)
+        self.status.setText("Setup complete.")
+        self.bar.setRange(0, 100)
+        self.bar.setValue(100)
+        self._done = True
+        self.completeChanged.emit()
+        wiz.next()  # straight into mesh selection
+
+    def _on_error(self, msg):
+        wiz = self.wizard()
+        wiz.button(QWizard.BackButton).setEnabled(True)
+        self.status.setText("Setup failed.")
+        QMessageBox.critical(self, "Pak Rat — setup", msg)
+        wiz.back()  # back to mode select
+
+    def isComplete(self):
+        return self._done
+
+    def nextId(self):
+        return PAGE_ASSET
+
+
+# ---------------------------------------------------------------------------
+# Cook list page — one pak, many meshes. Seeds the picked mesh, smart-detects
+# sibling parts (e.g. fishbowl → bowl/base/water), and lets you add more.
+# ---------------------------------------------------------------------------
+_MESH_FILTER = ("3D models (*.fbx *.obj *.gltf *.glb *.stl *.ply *.dae *.blend);;"
+                "All files (*)")
+
+
+class CookListPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Choose your 3D model(s)")
+        self.setSubTitle("One pak can hold several meshes. "
+                         "FBX / OBJ / glTF / GLB / STL / PLY / DAE / .blend.")
+        self._rows = []
+        self._stretch_added = False
+
+        self._container = QWidget()
+        self._vbox = QVBoxLayout(self._container)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._container)
+
+        self.add_btn = QPushButton("➕  Add another game mesh…")
+        self.add_btn.clicked.connect(self._add_another)
+        self.hint = QLabel("Fill at least one. Detected sibling parts are "
+                           "optional — leave them blank to skip.")
+        self.hint.setStyleSheet("color:#888;")
+        self.hint.setWordWrap(True)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(scroll)
+        lay.addWidget(self.add_btn)
+        lay.addWidget(self.hint)
+
+    def initializePage(self):
+        while self._vbox.count():
+            it = self._vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._rows = []
+        self._stretch_added = False
+        wiz = self.wizard()
+        wiz.cook_items = {}
+
+        primary = (self.field("asset") or "").strip()
+        if primary:
+            self._add_row(primary, "target")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                related = cook.related_meshes(primary)
+            except Exception:
+                related = []
+            finally:
+                QApplication.restoreOverrideCursor()
+            for m in related:
+                self._add_row(m, "related")
+
+        self._vbox.addStretch(1)
+        self._stretch_added = True
+        self.completeChanged.emit()
+
+    def _add_row(self, mount, kind):
+        if any(r["mount"] == mount for r in self._rows):
+            return
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        name = mount.rsplit("/", 1)[-1]
+        tag = {"target": "MESH", "related": "PART?", "added": "MESH"}.get(kind, "MESH")
+        lbl = QLabel(f"[{tag}]  {name}")
+        lbl.setMinimumWidth(230)
+        if kind == "related":
+            lbl.setToolTip("Auto-detected as part of this set — optional.")
+        status = QLabel("optional" if kind == "related" else "—")
+        status.setStyleSheet("color:#888;")
+        btn = QPushButton("Choose model…")
+        rec = {"mount": mount, "kind": kind, "status": status}
+        btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
+        h.addWidget(lbl)
+        h.addWidget(btn)
+        h.addWidget(status, 1)
+        if kind != "target":
+            rm = QPushButton("✕")
+            rm.setFixedWidth(28)
+            rm.clicked.connect(lambda _=False, row=row, rec=rec: self._remove(row, rec))
+            h.addWidget(rm)
+
+        if self._stretch_added:
+            self._vbox.insertWidget(self._vbox.count() - 1, row)
+        else:
+            self._vbox.addWidget(row)
+        self._rows.append(rec)
+
+    def _pick(self, rec):
+        name = rec["mount"].rsplit("/", 1)[-1]
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Model for {name}", "", _MESH_FILTER)
+        if not path:
+            return
+        if not cook.valid_mesh_source(path):
+            QMessageBox.warning(
+                self, "Unsupported file",
+                "Choose an FBX, OBJ, glTF/GLB, STL, PLY, DAE or .blend file.")
+            return
+        self.wizard().cook_items[rec["mount"]] = path
+        rec["status"].setText("✓ " + Path(path).name)
+        rec["status"].setStyleSheet(f"color:{GREEN}; font-weight:600;")
+        self.completeChanged.emit()
+
+    def _remove(self, row, rec):
+        self.wizard().cook_items.pop(rec["mount"], None)
+        if rec in self._rows:
+            self._rows.remove(rec)
+        row.deleteLater()
+        self.completeChanged.emit()
+
+    def _add_another(self):
+        items = core.load_meshes()
+        mount, ok = QInputDialog.getItem(
+            self, "Add a mesh", "Pick a game mesh to also replace:",
+            items, 0, True)
+        if ok and mount and mount.strip():
+            self._add_row(mount.strip(), "added")
+            self.completeChanged.emit()
+
+    def isComplete(self):
+        return bool(getattr(self.wizard(), "cook_items", {}))
+
+    def nextId(self):
+        return PAGE_PROCESS
+
+
+# ---------------------------------------------------------------------------
+# Process page — spinner while the pipeline runs
 # ---------------------------------------------------------------------------
 class PipelineWorker(QThread):
     status = Signal(str)
     done = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, mode, asset, image_info, mesh_plan, mesh_user_files):
+    def __init__(self, mode, asset, image_info, mesh_plan, mesh_user_files,
+                 cook_items=None):
         super().__init__()
         self.mode = mode
         self.asset = asset
         self.image_info = image_info
         self.mesh_plan = mesh_plan
         self.mesh_user_files = mesh_user_files
+        self.cook_items = cook_items or {}
 
     def run(self):
         try:
-            if self.mode == "mesh":
+            if self.mode == "cook":
+                items = [{"src": src, "target": tgt}
+                         for tgt, src in self.cook_items.items()]
+                pak = cook.run_cook_pipeline_multi(
+                    items, progress=lambda m, p=None: self.status.emit(m))
+            elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
             else:
@@ -532,7 +799,7 @@ class ProcessPage(QWizardPage):
         self.worker = PipelineWorker(
             getattr(w, "mode", "regular"), self.field("asset"),
             getattr(w, "image_info", None), getattr(w, "mesh_plan", None),
-            getattr(w, "mesh_user_files", {}))
+            getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)
@@ -591,59 +858,107 @@ class FinishPage(QWizardPage):
 
 
 # ---------------------------------------------------------------------------
-# Export page (extract mode) — hand the user the decoded original texture
+# Extract-list page (extract mode) — pull one or many originals at once, with
+# auto-detected sibling textures (_bc/_n/_ram). Saves to a chosen folder.
 # ---------------------------------------------------------------------------
-class ExportPage(QWizardPage):
+class ExtractListPage(QWizardPage):
     def __init__(self):
         super().__init__()
-        self.setTitle("Extract the original texture")
-        self.setSubTitle("Save the game's original art so you can edit it.")
+        self.setTitle("Extract textures")
+        self.setSubTitle("Pull originals out of the game to edit — pick one or many.")
+        self._rows = []
+        self._stretch_added = False
 
-        self.spec_lbl = QLabel("")
-        self.spec_lbl.setWordWrap(True)
+        self._container = QWidget()
+        self._vbox = QVBoxLayout(self._container)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._container)
 
-        self.preview = QLabel("Original")
-        self.preview.setFixedSize(150, 150)
-        self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setStyleSheet("border:1px solid #444; color:#888;")
-
+        self.add_btn = QPushButton("➕  Add another texture…")
+        self.add_btn.clicked.connect(self._add_another)
         self.fmt = QComboBox()
-        # PNG first (default) — easiest to edit; DDS preserves exact format+mips.
         self.fmt.addItem("PNG — easy to edit (recommended)", "png")
         self.fmt.addItem("DDS — exact format + mips (for re-injection)", "dds")
         self.fmt.setMaximumWidth(360)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(self.spec_lbl)
-        lay.addWidget(self.preview)
-        lay.addSpacing(8)
+        lay.addWidget(scroll)
+        lay.addWidget(self.add_btn)
         lay.addWidget(QLabel("Export format:"))
         lay.addWidget(self.fmt)
-        lay.addStretch(1)
 
     def selected_format(self) -> str:
         return self.fmt.currentData() or "png"
 
+    def selected_assets(self):
+        return [r["mount"] for r in self._rows if r["cb"].isChecked()]
+
     def initializePage(self):
         self.setFinalPage(True)
         self.wizard().setButtonText(QWizard.FinishButton, "Save…")
-        spec = getattr(self.wizard(), "target_spec", None)
-        self.preview.setText("(no preview)")
-        if spec is not None:
-            self.spec_lbl.setText(
-                f"Extracting:  {_basename(spec.asset)}\n"
-                f"{spec.tex_type} · {spec.dxgi_format} · "
-                f"{spec.width}×{spec.height} · {spec.mips} mips")
-            if spec.preview_png and Path(spec.preview_png).exists():
-                pm = QPixmap(spec.preview_png)
-                if not pm.isNull():
-                    self.preview.setPixmap(pm.scaled(
-                        self.preview.size(), Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation))
+        while self._vbox.count():
+            it = self._vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._rows = []
+        self._stretch_added = False
+
+        primary = (self.field("asset") or "").strip()
+        if primary:
+            self._add_row(primary, removable=False)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                rel = core.related_textures(primary)
+            except Exception:
+                rel = []
+            finally:
+                QApplication.restoreOverrideCursor()
+            for m in rel:
+                self._add_row(m, removable=True)
+        self._vbox.addStretch(1)
+        self._stretch_added = True
         self.completeChanged.emit()
 
+    def _add_row(self, mount, removable):
+        if any(r["mount"] == mount for r in self._rows):
+            return
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        cb = QCheckBox(_basename(mount))
+        cb.setChecked(True)
+        cb.toggled.connect(lambda *_: self.completeChanged.emit())
+        rec = {"mount": mount, "cb": cb}
+        h.addWidget(cb, 1)
+        if removable:
+            rm = QPushButton("✕")
+            rm.setFixedWidth(28)
+            rm.clicked.connect(lambda _=False, row=row, rec=rec: self._remove(row, rec))
+            h.addWidget(rm)
+        if self._stretch_added:
+            self._vbox.insertWidget(self._vbox.count() - 1, row)
+        else:
+            self._vbox.addWidget(row)
+        self._rows.append(rec)
+
+    def _remove(self, row, rec):
+        if rec in self._rows:
+            self._rows.remove(rec)
+        row.deleteLater()
+        self.completeChanged.emit()
+
+    def _add_another(self):
+        items = core.load_assets()
+        mount, ok = QInputDialog.getItem(
+            self, "Add a texture", "Pick a texture to extract:", items, 0, True)
+        if ok and mount and mount.strip():
+            self._add_row(mount.strip(), removable=True)
+            self.completeChanged.emit()
+
     def isComplete(self):
-        return getattr(self.wizard(), "target_spec", None) is not None
+        return bool(self.selected_assets())
 
     def isFinalPage(self):
         return True
@@ -664,8 +979,10 @@ class PakRatWizard(QWizard):
         self.target_spec = None
         self.mesh_plan = None
         self.mesh_user_files = {}
+        self.cook_items = {}
+        self.cook_available = None
 
-        self.setWindowTitle("Pak Rat")
+        self.setWindowTitle(f"Pak Rat v{APP_VERSION}")
         self.setWindowIcon(QIcon(resource_path("Pak-Rat.ico")))
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
@@ -679,12 +996,19 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_REQUIRED, RequiredFilesPage())
         self.setPage(PAGE_PROCESS, ProcessPage())
         self.setPage(PAGE_FINISH, FinishPage())
-        self.setPage(PAGE_EXPORT, ExportPage())
+        self.setPage(PAGE_SETUP, SetupPage())
+        self.setPage(PAGE_COOKINPUT, CookListPage())
+        self.setPage(PAGE_EXTRACTLIST, ExtractListPage())
         self.setStartId(PAGE_MODE)
 
     def _ask_pak_name(self) -> str | None:
         """Prompt for the mod's file name. None if the user cancels."""
-        leaf = _basename(self.target_spec.asset) if self.target_spec else ""
+        if self.target_spec:
+            leaf = _basename(self.target_spec.asset)
+        elif getattr(self, "mesh_plan", None):
+            leaf = _basename(self.mesh_plan.mesh)
+        else:
+            leaf = _basename(self.field("asset") or "")
         suggestion = leaf or "MyMod"
         name, ok = QInputDialog.getText(
             self, "Name your pak",
@@ -693,29 +1017,32 @@ class PakRatWizard(QWizard):
         return name if ok else None
 
     def _accept_extract(self):
-        """Extract mode final action: decode the original to the user's chosen
-        file + format, reveal it, then close."""
-        spec = self.target_spec
-        if spec is None:
+        """Extract mode final action: decode the selected originals to a chosen
+        folder, reveal them, then close."""
+        page = self.page(PAGE_EXTRACTLIST)
+        assets = page.selected_assets()
+        if not assets:
             return
-        fmt = self.page(PAGE_EXPORT).selected_format()
-        leaf = _basename(spec.asset)
-        default = str(Path(os.path.expanduser("~")) / "Documents" / f"{leaf}.{fmt}")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save extracted texture", default,
-            f"{fmt.upper()} (*.{fmt});;All files (*)")
-        if not path:
-            return  # cancelled the save dialog — keep the wizard open
-        if not path.lower().endswith("." + fmt):
-            path += "." + fmt
+        fmt = page.selected_format()
+        default = str(Path(os.path.expanduser("~")) / "Documents")
+        dest = QFileDialog.getExistingDirectory(
+            self, "Choose a folder to save the extracted textures", default)
+        if not dest:
+            return  # cancelled — keep the wizard open
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            out = core.export_texture(spec, path, fmt)
+            written = core.export_many(assets, dest, fmt)
         except Exception as e:  # surface; keep open so the user can retry
-            QMessageBox.critical(self, "Pak Rat", f"Export failed:\n{e}")
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Pak Rat", f"Extract failed:\n{e}")
             return
-        core.reveal_in_explorer(out)
+        QApplication.restoreOverrideCursor()
+        if not written:
+            QMessageBox.warning(self, "Pak Rat", "Nothing was extracted.")
+            return
+        core.reveal_in_explorer(written[0])
         QMessageBox.information(
-            self, "Pak Rat", f"Extracted the original texture:\n{Path(out).name}")
+            self, "Pak Rat", f"Extracted {len(written)} texture(s) to:\n{dest}")
         super().accept()
 
     def accept(self):
