@@ -243,11 +243,16 @@ _NO_GAME = ("(placeholder) couldn't read the game's assets — is Retro Rewind "
             "installed?")
 
 
+_MESH_ROOT = "RetroRewind/Content/VideoStore/asset/meshes/"
+
+
 def _generate_clean_lists() -> None:
     """Scan the installed base pak and (re)write textures_clean.txt + meshes_clean.txt.
     Texture rule (per Yodah): a swappable texture is T_<name>_bc — the base colour.
     Any other T_ asset is an NPC/other map we deliberately leave alone.
-    Mesh rule: LA_/SM_ static meshes (SK_/SKM_ skeletal are excluded)."""
+    Mesh rule (per Yodah): LA_/SM_ static meshes living under the game's mesh
+    folder (RetroRewind/Content/VideoStore/asset/meshes) — this excludes L10N
+    duplicates, NPC/character meshes, and effect-room props elsewhere."""
     tex, mesh = [], []
     for e in _pak_entries():
         if not e.endswith(".uasset"):
@@ -256,7 +261,7 @@ def _generate_clean_lists() -> None:
         leaf = m.rsplit("/", 1)[-1]
         if leaf.startswith("T_") and leaf.endswith("_bc"):
             tex.append(m)
-        elif leaf.startswith(("LA_", "SM_")):
+        elif m.startswith(_MESH_ROOT) and leaf.startswith(("LA_", "SM_")):
             mesh.append(m)
     d = _data_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -536,6 +541,57 @@ def run_pipeline(asset: str, image: ImageInfo, mesh_path: str | None = None,
            "--path-hash-seed", PAK_SEED, str(stage), str(out_pak))
     say("Done.")
     return str(out_pak)
+
+
+def run_pipeline_multi(items: list[dict], progress=None) -> str:
+    """Inject several textures and pack them all into ONE pak.
+
+    items = [{"texture": <mount, no ext>, "image": <png/dds path>}, …].
+    Each texture is extracted for its exact format/size, the chosen image is
+    resized + injected, and every result is staged under its real mount tree so
+    a single repak run produces one drop-in pak. Returns the pak path.
+    """
+    def say(msg: str):
+        if progress:
+            progress(msg)
+    if not items:
+        raise RuntimeError("No textures to pack.")
+
+    work = Path(tempfile.mkdtemp(prefix="pakrat_tex_multi_"))
+    stage = work / "stage"
+    specs = []
+    try:
+        n = len(items)
+        for i, it in enumerate(items, 1):
+            tex = it["texture"].rstrip("/")
+            leaf = tex.split("/")[-1]
+            say(f"Extracting {leaf}  ({i}/{n})…")
+            spec = prepare_target(tex)
+            specs.append(spec)
+            say(f"Injecting {leaf}  ({i}/{n})…")
+            prepared = prepare_image(it["image"], spec)
+            injected = Path(spec.work_dir) / "injected"
+            _injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
+                       "--version", UE_VERSION, "--save_folder", str(injected)])
+            rel_dir = "/".join(tex.split("/")[:-1])
+            stage_leaf = stage / rel_dir
+            stage_leaf.mkdir(parents=True, exist_ok=True)
+            for ext in ("uasset", "uexp", "ubulk"):
+                src = injected / f"{leaf}.{ext}"
+                if src.is_file():
+                    shutil.copy2(src, stage_leaf / src.name)
+
+        say("Packaging .pak…")
+        first = items[0]["texture"].rstrip("/").split("/")[-1]
+        name = first if n == 1 else f"{first}_plus{n - 1}"
+        out_pak = work / f"zzz_PakRat_{name}_P.pak"
+        _repak("pack", "--version", PAK_VERSION, "--mount-point", PAK_MOUNT,
+               "--path-hash-seed", PAK_SEED, str(stage), str(out_pak))
+        say("Done.")
+        return str(out_pak)
+    finally:
+        for s in specs:
+            cleanup_target(s)
 
 
 # ---------------------------------------------------------------------------

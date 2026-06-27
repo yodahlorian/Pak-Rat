@@ -5,11 +5,13 @@ Installer-style QWizard. Real injection/packaging lives in core.py; the UE
 cooking toolchain lives in cook.py. This file is pure UI + flow.
 
 Four modes (chosen on ModePage):
-  regular  ModePage → AssetPage → ExtractPage → ImagePage → ProcessPage → FinishPage
+  regular  ModePage → AssetPage → TextureListPage → ProcessPage → FinishPage
   mesh     ModePage → AssetPage → ExtractPage → RequiredFilesPage → ProcessPage → FinishPage
-  cook     ModePage → [SetupPage] → AssetPage → CookListPage → ProcessPage → FinishPage
+  cook     ModePage → SetupPage → AssetPage → CookListPage → ProcessPage → FinishPage
   extract  ModePage → AssetPage → ExtractListPage  (hands back originals; no packaging)
-  (SetupPage only on first cook run; cook mode shown only when an Unreal install is found.)
+  regular & extract pack MANY items into one pak. SetupPage is always step 1 of the
+  cook path (short-circuits instantly if already set up). Cook mode is shown only when
+  an Unreal install is found — otherwise ModePage shows an "install UE 5.4.4" note.
 
 Run (Windows):  python.exe pak_rat.py
 """
@@ -19,7 +21,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QFileDialog,
@@ -33,7 +35,7 @@ import core  # noqa: E402
 import cook  # noqa: E402  (v2 UE cooking toolchain)
 
 # Page ids
-PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_IMAGE, PAGE_REQUIRED, PAGE_PROCESS, \
+PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, \
     PAGE_EXTRACTLIST = range(10)
 
@@ -97,15 +99,25 @@ class ModePage(QWizardPage):
         lay.addWidget(lab3)
         lay.addStretch(1)
 
+        # Shown only when no Unreal Engine is installed (cooker hidden then).
+        self.cook_note = QLabel("NOTE: Install Unreal Engine 5.4.4 from the Epic "
+                                "Games Launcher to unlock Mesh Cooking.")
+        self.cook_note.setWordWrap(True)
+        self.cook_note.setStyleSheet("color:#c08a2e; font-style:italic;")
+        self.cook_note.setVisible(False)
+        lay.addWidget(self.cook_note)
+
     def initializePage(self):
         self.wizard().mode = "regular"
-        # The cooker needs an installed Unreal Engine; hide it otherwise.
+        # The cooker needs an installed Unreal Engine; hide it (and show a hint)
+        # otherwise.
         avail = getattr(self.wizard(), "cook_available", None)
         if avail is None:
             avail = cook.ue_available()
             self.wizard().cook_available = avail
         self.rb_cook.setVisible(avail)
         self.cook_lab.setVisible(avail)
+        self.cook_note.setVisible(not avail)
         if not avail and self.rb_cook.isChecked():
             self.rb_regular.setChecked(True)
         self.group.idToggled.connect(self._on_toggle)
@@ -121,8 +133,10 @@ class ModePage(QWizardPage):
             self.wizard().mode = "regular"
 
     def nextId(self):
+        # Cooker path ALWAYS starts at the setup page (step 1). It short-circuits
+        # instantly when the toolchain is already installed.
         if getattr(self.wizard(), "mode", "regular") == "cook":
-            return PAGE_ASSET if cook.is_ready() else PAGE_SETUP
+            return PAGE_SETUP
         return PAGE_ASSET
 
 
@@ -234,7 +248,9 @@ class AssetPage(QWizardPage):
             return PAGE_COOKINPUT
         if mode == "extract":
             return PAGE_EXTRACTLIST
-        return PAGE_EXTRACT
+        if mode == "mesh":
+            return PAGE_EXTRACT
+        return PAGE_TEXLIST
 
 
 # ---------------------------------------------------------------------------
@@ -317,109 +333,118 @@ class ExtractPage(QWizardPage):
         return self._done
 
     def nextId(self):
-        mode = getattr(self.wizard(), "mode", "regular")
-        if mode == "mesh":
-            return PAGE_REQUIRED
-        return PAGE_IMAGE
+        return PAGE_REQUIRED  # ExtractPage is reached only by mesh mode now
 
 
 # ---------------------------------------------------------------------------
-# Page 3 — image (PNG/DDS) picker + validation
+# Texture list page (regular mode) — swap one or many textures into ONE pak.
+# Mirrors the cook/extract list pages: the picked texture is seeded, you can add
+# more, and you choose a replacement PNG/DDS per row. Each image is auto-resized
+# to its target's exact size at pack time.
 # ---------------------------------------------------------------------------
-class ImagePage(QWizardPage):
+class TextureListPage(QWizardPage):
     def __init__(self):
         super().__init__()
-        self.setTitle("Choose replacement texture")
-        self.setSubTitle("Select the PNG or DDS you want to swap in.")
-        self._validated = False
+        self.setTitle("Choose your replacement textures")
+        self.setSubTitle("One pak can hold several texture swaps — "
+                         "pick a PNG or DDS for each.")
+        self._rows = []
+        self._stretch_added = False
 
-        self.spec_lbl = QLabel("")
-        self.spec_lbl.setWordWrap(True)
+        self._container = QWidget()
+        self._vbox = QVBoxLayout(self._container)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._container)
 
-        # Two thumbnails side by side: the original ("before") and the user's.
-        self.preview = QLabel("Original")
-        self.new_preview = QLabel("Your image")
-        for p in (self.preview, self.new_preview):
-            p.setFixedSize(150, 150)
-            p.setAlignment(Qt.AlignCenter)
-            p.setStyleSheet("border:1px solid #444; color:#888;")
-
-        self.btn = QPushButton("Choose PNG / DDS…")
-        self.btn.clicked.connect(self.pick_file)
-        self.status = QLabel("No file chosen.")
-        self.status.setWordWrap(True)
-
-        thumbs = QHBoxLayout()
-        thumbs.addWidget(self.preview)
-        thumbs.addWidget(self.new_preview)
-        thumbs.addStretch(1)
+        self.add_btn = QPushButton("➕  Add another texture…")
+        self.add_btn.clicked.connect(self._add_another)
+        self.hint = QLabel("Each image is resized to its target's exact size "
+                           "automatically. Fill at least one.")
+        self.hint.setStyleSheet("color:#888;")
+        self.hint.setWordWrap(True)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(self.spec_lbl)
-        lay.addLayout(thumbs)
-        lay.addSpacing(8)
-        lay.addWidget(self.btn)
-        lay.addSpacing(6)
-        lay.addWidget(self.status)
-        lay.addStretch(1)
+        lay.addWidget(scroll)
+        lay.addWidget(self.add_btn)
+        lay.addWidget(self.hint)
 
     def initializePage(self):
-        self._validated = False
-        self.status.setText("No file chosen.")
-        self.status.setStyleSheet("")
-        spec = getattr(self.wizard(), "target_spec", None)
-        if spec is not None:
-            self.spec_lbl.setText(
-                f"Replacing:  {_basename(spec.asset)}\n"
-                f"{spec.tex_type} · {spec.dxgi_format} · "
-                f"{spec.width}×{spec.height} · {spec.mips} mips\n"
-                f"Your image is resized to {spec.width}×{spec.height}.")
-            self.preview.setText("(no preview)")
-            if spec.preview_png and Path(spec.preview_png).exists():
-                pm = QPixmap(spec.preview_png)
-                if not pm.isNull():
-                    self.preview.setPixmap(pm.scaled(
-                        self.preview.size(), Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation))
-        # reset the user's-image thumbnail each time the page is shown
-        self.new_preview.clear()
-        self.new_preview.setText("Your image")
+        while self._vbox.count():
+            it = self._vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._rows = []
+        self._stretch_added = False
+        wiz = self.wizard()
+        wiz.tex_items = {}
+        primary = (self.field("asset") or "").strip()
+        if primary:
+            self._add_row(primary, removable=False)
+        self._vbox.addStretch(1)
+        self._stretch_added = True
         self.completeChanged.emit()
 
-    def pick_file(self):
-        # Default the picker's filename to the chosen asset's leaf name.
-        default_name = _basename(self.field("asset") or "")
+    def _add_row(self, mount, removable):
+        if any(r["mount"] == mount for r in self._rows):
+            return
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(f"[TEX]  {_basename(mount)}")
+        lbl.setMinimumWidth(230)
+        status = QLabel("—")
+        status.setStyleSheet("color:#888;")
+        btn = QPushButton("Choose PNG / DDS…")
+        rec = {"mount": mount, "status": status}
+        btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
+        h.addWidget(lbl)
+        h.addWidget(btn)
+        h.addWidget(status, 1)
+        if removable:
+            rm = QPushButton("✕")
+            rm.setFixedWidth(28)
+            rm.clicked.connect(lambda _=False, row=row, rec=rec: self._remove(row, rec))
+            h.addWidget(rm)
+        if self._stretch_added:
+            self._vbox.insertWidget(self._vbox.count() - 1, row)
+        else:
+            self._vbox.addWidget(row)
+        self._rows.append(rec)
+
+    def _pick(self, rec):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose replacement texture", default_name,
-            "Images (*.png *.dds);;All files (*)")
+            self, f"Replacement for {_basename(rec['mount'])}",
+            _basename(rec["mount"]), "Images (*.png *.dds);;All files (*)")
         if not path:
             return
         if not core.validate_image_ext(path):
             QMessageBox.warning(self, "Wrong file type",
                                 "Please choose a PNG or DDS file.")
-            self.pick_file()  # back to the picker
             return
-        info = core.prepare_image(path, self.wizard().target_spec)
-        self.wizard().image_info = info
-        # Thumbnail of THEIR image. prepared_png is always a valid PNG (RGBA,
-        # resized) — covers PNG and DDS inputs alike; fall back to a label.
-        pm = QPixmap(info.prepared_png)
-        if not pm.isNull():
-            self.new_preview.setPixmap(pm.scaled(
-                self.new_preview.size(), Qt.KeepAspectRatio,
-                Qt.SmoothTransformation))
-        else:
-            self.new_preview.setText(
-                "DDS (no preview)" if info.ext == ".dds" else "(no preview)")
-        self._validated = True
-        self.status.setText(
-            f"✓ Validated  ·  {Path(path).name}\n"
-            f"   {path}\n   encoding: {info.encoding}")
-        self.status.setStyleSheet(f"color:{GREEN}; font-weight:600;")
+        self.wizard().tex_items[rec["mount"]] = path
+        rec["status"].setText("✓ " + Path(path).name)
+        rec["status"].setStyleSheet(f"color:{GREEN}; font-weight:600;")
         self.completeChanged.emit()
 
+    def _remove(self, row, rec):
+        self.wizard().tex_items.pop(rec["mount"], None)
+        if rec in self._rows:
+            self._rows.remove(rec)
+        row.deleteLater()
+        self.completeChanged.emit()
+
+    def _add_another(self):
+        items = core.load_assets()
+        mount, ok = QInputDialog.getItem(
+            self, "Add a texture", "Pick a texture to replace:", items, 0, True)
+        if ok and mount and mount.strip():
+            self._add_row(mount.strip(), removable=True)
+            self.completeChanged.emit()
+
     def isComplete(self):
-        return self._validated
+        return bool(getattr(self.wizard(), "tex_items", {}))
 
     def nextId(self):
         return PAGE_PROCESS
@@ -554,6 +579,17 @@ class SetupPage(QWizardPage):
         self._done = False
         self.completeChanged.emit()
         wiz = self.wizard()
+        # Already installed? Setup stays step 1 of the cook path, it just
+        # completes instantly and moves on.
+        if cook.is_ready():
+            self.info.setText("Cooker already set up — nothing to download.")
+            self.status.setText("Ready.")
+            self.bar.setRange(0, 100)
+            self.bar.setValue(100)
+            self._done = True
+            self.completeChanged.emit()
+            QTimer.singleShot(0, wiz.next)
+            return
         ue = cook.pick_ue()
         ue_txt = (f"Found Unreal Engine {ue['version']}." if ue
                   else "No Unreal Engine found.")
@@ -561,8 +597,8 @@ class SetupPage(QWizardPage):
             f"{ue_txt}\n\nPak Rat will download a portable Blender (~370 MB) and "
             "build a small cooking project. Nothing is installed system-wide; it "
             "all lives in your user folder and is reused next time.")
+        # Next stays disabled via isComplete() until setup finishes.
         wiz.button(QWizard.BackButton).setEnabled(False)
-        wiz.button(QWizard.NextButton).setEnabled(False)
         self.worker = SetupWorker()
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._on_done)
@@ -584,8 +620,8 @@ class SetupPage(QWizardPage):
         self.bar.setRange(0, 100)
         self.bar.setValue(100)
         self._done = True
-        self.completeChanged.emit()
-        wiz.next()  # straight into mesh selection
+        self.completeChanged.emit()          # re-enables Next via isComplete()
+        QTimer.singleShot(0, wiz.next)        # straight into mesh selection
 
     def _on_error(self, msg):
         wiz = self.wizard()
@@ -743,15 +779,14 @@ class PipelineWorker(QThread):
     done = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, mode, asset, image_info, mesh_plan, mesh_user_files,
-                 cook_items=None):
+    def __init__(self, mode, mesh_plan, mesh_user_files,
+                 cook_items=None, tex_items=None):
         super().__init__()
         self.mode = mode
-        self.asset = asset
-        self.image_info = image_info
         self.mesh_plan = mesh_plan
         self.mesh_user_files = mesh_user_files
         self.cook_items = cook_items or {}
+        self.tex_items = tex_items or {}
 
     def run(self):
         try:
@@ -763,9 +798,10 @@ class PipelineWorker(QThread):
             elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
-            else:
-                pak = core.run_pipeline(self.asset, self.image_info, None,
-                                        progress=self.status.emit)
+            else:  # regular texture mode — one or many textures into one pak
+                items = [{"texture": tex, "image": img}
+                         for tex, img in self.tex_items.items()]
+                pak = core.run_pipeline_multi(items, progress=self.status.emit)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
         else:
@@ -797,9 +833,9 @@ class ProcessPage(QWizardPage):
         # lock navigation while working
         w.button(QWizard.BackButton).setEnabled(False)
         self.worker = PipelineWorker(
-            getattr(w, "mode", "regular"), self.field("asset"),
-            getattr(w, "image_info", None), getattr(w, "mesh_plan", None),
-            getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}))
+            getattr(w, "mode", "regular"), getattr(w, "mesh_plan", None),
+            getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}),
+            getattr(w, "tex_items", {}))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)
@@ -974,12 +1010,12 @@ class PakRatWizard(QWizard):
     def __init__(self):
         super().__init__()
         self.mode = "regular"
-        self.image_info = None
         self.pak_path = None
         self.target_spec = None
         self.mesh_plan = None
         self.mesh_user_files = {}
         self.cook_items = {}
+        self.tex_items = {}
         self.cook_available = None
 
         self.setWindowTitle(f"Pak Rat v{APP_VERSION}")
@@ -992,7 +1028,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_MODE, ModePage())
         self.setPage(PAGE_ASSET, AssetPage())
         self.setPage(PAGE_EXTRACT, ExtractPage())
-        self.setPage(PAGE_IMAGE, ImagePage())
+        self.setPage(PAGE_TEXLIST, TextureListPage())
         self.setPage(PAGE_REQUIRED, RequiredFilesPage())
         self.setPage(PAGE_PROCESS, ProcessPage())
         self.setPage(PAGE_FINISH, FinishPage())
