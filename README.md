@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.4**
+**Version 2.0.5**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -146,6 +146,11 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.5
+- **Fixed the Blender download getting a 403 Forbidden** on first-run Cook setup —
+  the download CDN rejects the default request agent; Pak Rat now sends a proper
+  User-Agent.
 
 ### 2.0.4
 - **Fixed first-run Cook setup failing** with `urlopen error unknown url type:

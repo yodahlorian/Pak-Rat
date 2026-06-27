@@ -172,14 +172,23 @@ def ensure_blender(progress=None) -> str:
     dest.mkdir(parents=True, exist_ok=True)
     zp = dest / "_blender.zip"
 
-    def hook(count, bsize, total):
-        if progress and total > 0:
-            pct = min(99, int(count * bsize * 100 / total))
-            progress("Downloading Blender…  %d%%" % pct, pct)
-
     if progress:
         progress("Downloading Blender (~370 MB)…", 0)
-    urllib.request.urlretrieve(BLENDER_URL, str(zp), hook)
+    # A real User-Agent is required: the download CDN (Cloudflare) returns 403
+    # Forbidden to the default python-urllib agent.
+    req = urllib.request.Request(BLENDER_URL, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req) as resp, open(zp, "wb") as f:
+        total = int(resp.headers.get("Content-Length", 0) or 0)
+        read = 0
+        while True:
+            chunk = resp.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            read += len(chunk)
+            if progress and total > 0:
+                pct = min(99, int(read * 100 / total))
+                progress("Downloading Blender…  %d%%" % pct, pct)
 
     with zipfile.ZipFile(zp) as z:
         members = z.namelist()
