@@ -1,22 +1,26 @@
 # Pak Rat
 
-**Version 1.0.2**
+**Version 2.0.0**
 
-**Automatic asset packager for Retro Rewind (UE 5.4).**
+**Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
-Pak Rat builds a ready-to-use `.pak` mod from your own art — swap a texture, or
-swap a mesh together with its textures — through a simple step-by-step wizard.
-No command line, no manual repacking.
+Pak Rat builds a ready-to-use `.pak` mod from your own art through a simple
+step-by-step wizard — no command line, no manual repacking. Swap textures, swap
+pre-cooked meshes, **cook your own 3D models** with Unreal, pull originals out to
+edit, or **combine mods** you already have into one pak.
 
 ---
 
 ## Requirements
 
 - **Windows**
-- **Retro Rewind installed** (Steam library or `Documents\RR`). Pak Rat reads
-  the game's base pak to pull the original assets it needs.
+- **Retro Rewind installed via Steam.** Pak Rat reads the game's base pak to pull
+  the original assets it needs (and builds its texture/mesh lists from your copy
+  on first run).
+- **Unreal Engine 5.4 (optional)** — only for the **Cook Mesh** mode. Install it
+  free from the Epic Games Launcher. Everything else works without it.
 
-Nothing else to install — the app is self-contained.
+Nothing else to install — the app is otherwise self-contained.
 
 ---
 
@@ -37,17 +41,17 @@ Double-click **`Pak-Rat.exe`**.
 On Page 1 you pick a mode:
 
 ### Regular Texture
-Swap a single texture on an existing asset.
+Swap one or many textures — all packed into a single `.pak`.
 
-1. Pick the texture from the dropdown (type to filter).
-2. Pak Rat live-extracts the original and reads its format/size — you'll see a
-   preview and the spec (e.g. `BC1_UNORM · 2048×2048 · 12 mips`).
-3. Choose your replacement **PNG or DDS**. It's resized to the original's exact
-   dimensions and re-encoded to the matching format automatically.
-4. Pak Rat injects and packs the `.pak`.
+1. Pick a texture from the dropdown (type to filter).
+2. Choose a replacement **PNG or DDS** for it. Add as many more textures as you
+   like, each with its own image.
+3. Each image is automatically resized to its target's exact dimensions and
+   re-encoded to the matching BC format.
+4. Pak Rat injects them all and packs one `.pak`.
 
 ### Mesh + Texture
-Swap a mesh and the assets it depends on.
+Swap a pre-cooked mesh and the assets it depends on.
 
 1. Pick the mesh, then its overlay texture.
 2. Pak Rat walks the mesh's dependencies (materials → textures) and lists every
@@ -57,9 +61,18 @@ Swap a mesh and the assets it depends on.
    are shown as "vanilla, not swappable"; shared assets are flagged.
 4. Pak Rat packs everything into the `.pak`.
 
-> **Note:** Pak Rat *packages* meshes — it does not cook them. You must supply
-> already-cooked mesh `.uasset` files (exported/cooked in the Unreal Editor).
-> Texture cooking is fully automatic.
+### Cook Mesh from a 3D file  *(needs Unreal Engine 5.4)*
+Bring your own model in almost any format — Pak Rat cooks it for you.
+
+1. On first use, Pak Rat downloads a portable Blender and builds a small cook
+   project (one-time, cached in your user folder).
+2. Pick the game mesh your model stands in for.
+3. Choose your model file (**FBX, OBJ, glTF/GLB, STL, PLY, DAE or .blend**); add
+   more meshes to pack together if you want.
+4. Pak Rat converts it with Blender, cooks it with your installed Unreal Engine
+   5.4, retargets it onto the game's real materials, and packs the `.pak`.
+
+> This mode appears only when an Unreal Engine install is detected.
 
 ### Extract Texture
 Pull an original texture out of the game to use as a starting point.
@@ -74,6 +87,14 @@ Pull an original texture out of the game to use as a starting point.
 Edit the PNG, then come back through **Regular Texture** to swap your version
 back in.
 
+### Combine Mods
+Merge mods you already have into a single `.pak`.
+
+1. Pak Rat lists the paks in your `~mods` folder; add any others with **Add pak**.
+2. It shows every asset across them and flags conflicts (the same asset in more
+   than one pak). Tick the assets you want; for conflicts, pick the winner.
+3. Pak Rat merges your selection into one conflict-free `.pak`.
+
 ### Finishing
 When the `.pak` is built, name it, then choose:
 
@@ -84,11 +105,15 @@ When the `.pak` is built, name it, then choose:
 
 ## Notes & limitations
 
-- Texture list = the game's swappable `_bc` textures. Mesh list = static meshes
-  (`LA_`/`SM_`). Skeletal meshes (`SK_`) and virtual textures aren't supported in
-  this version.
-- Importing raw `.fbx`/`.obj` and cooking meshes for you is planned for a future
-  version (it will require a local Unreal Engine 5.4 install).
+- The texture/mesh lists are built from your own installed game on first run and
+  cached. Texture list = the game's swappable `T_…_bc` base-colour textures; mesh
+  list = the static meshes (`LA_`/`SM_`) under the game's mesh folder. Skeletal
+  meshes (`SK_`) and virtual textures aren't supported.
+- **Cook Mesh** needs a local Unreal Engine 5.4 install (Epic Games Launcher) and
+  downloads a portable Blender on first use.
+- **Combine Mods** packs only the assets you tick — if a swapped mesh needs a
+  custom material that you leave unticked, it can render wrong. Pack the assets
+  that belong together.
 
 ---
 
@@ -112,6 +137,16 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.0
+- **Cook Mesh from a 3D file** — bring an FBX/OBJ/glTF/GLB/STL/PLY/DAE/.blend and
+  Pak Rat converts it with a bundled portable Blender and cooks it with your
+  installed Unreal Engine 5.4, retargeting it onto the game's real materials.
+- **Combine Mods** — cherry-pick assets from paks you already have and merge them
+  into one conflict-aware `.pak`.
+- **Regular Texture** now packs one *or many* textures into a single pak.
+- Texture/mesh lists are generated from your own installed game on first run
+  (nothing baked in) and Steam-library discovery is more robust.
 
 ### 1.0.2
 - **Oodle is no longer bundled.** `oo2core` is proprietary (RAD/Epic) and can't
