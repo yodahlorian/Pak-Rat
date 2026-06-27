@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.0**
+**Version 2.0.2**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -69,22 +69,27 @@ Bring your own model in almost any format — Pak Rat cooks it for you.
 2. Pick the game mesh your model stands in for.
 3. Choose your model file (**FBX, OBJ, glTF/GLB, STL, PLY, DAE or .blend**); add
    more meshes to pack together if you want.
-4. Pak Rat converts it with Blender, cooks it with your installed Unreal Engine
-   5.4, retargets it onto the game's real materials, and packs the `.pak`.
+4. Optionally swap the textures the mesh uses — a fresh mesh usually wants fresh
+   textures. This step is offered next and is skippable.
+5. Pak Rat converts it with Blender, cooks it with your installed Unreal Engine
+   5.4, retargets it onto the game's real materials, and packs the `.pak` (your
+   textures, if any, go in the same pak).
 
 > This mode appears only when an Unreal Engine install is detected.
 
-### Extract Texture
-Pull an original texture out of the game to use as a starting point.
+### Extract Asset
+Pull an original asset out of the game to use as a starting point — textures
+(decoded to PNG/DDS) or meshes (handed back as their cooked `.uasset`).
 
-1. Pick the texture from the dropdown (type to filter).
-2. Pak Rat live-extracts the original and shows its spec + preview.
-3. Choose a format:
+1. Pick a texture or mesh from the dropdown (type to filter). Related sibling
+   assets are auto-added — untick any you don't want.
+2. Pak Rat shows a preview thumbnail of each texture (hover to enlarge).
+3. Choose the texture export format:
    - **PNG** — decoded, easy to edit in any image editor (recommended).
    - **DDS** — the exact BC format + full mip chain, for a clean re-inject.
-4. Pick where to save it. Pak Rat writes the file and opens the folder.
+4. Pick a folder; Pak Rat extracts everything (with a progress screen) and opens it.
 
-Edit the PNG, then come back through **Regular Texture** to swap your version
+Edit a PNG, then come back through **Regular Texture** to swap your version
 back in.
 
 ### Combine Mods
@@ -137,6 +142,11 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.2
+- Bigger **hover previews** (512px) across the texture swapper, cooker, extractor
+  and combiner, with a "hover to enlarge" caption under each.
+- A neon **loading spinner** shows in each thumbnail while its preview decodes.
 
 ### 2.0.1
 - **New synthwave look** themed from the app icon (neon cyan/magenta on dark).

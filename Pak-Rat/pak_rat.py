@@ -24,7 +24,8 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPalette,
+                           QPen, QPixmap)
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QProgressBar,
@@ -42,7 +43,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -130,24 +131,74 @@ def _basename(asset: str) -> str:
     return asset.rstrip("/").split("/")[-1]
 
 
-def _thumb_label(size: int = 56) -> QLabel:
-    """A fixed-size bordered placeholder for an asset thumbnail."""
-    lab = QLabel("…")
-    lab.setFixedSize(size, size)
-    lab.setAlignment(Qt.AlignCenter)
-    lab.setStyleSheet(f"border:1px solid {BORDER}; color:{MUTED};")
-    return lab
+HOVER_PX = 512   # size of the large on-hover preview (screen-safe; <1080p tall)
 
 
-def _set_thumb(label: QLabel, png_path: str):
-    """Fill a thumbnail label with a scaled image, or a dash if none."""
-    if png_path and os.path.exists(png_path):
-        pm = QPixmap(png_path)
-        if not pm.isNull():
-            label.setPixmap(pm.scaled(label.size(), Qt.KeepAspectRatio,
-                                      Qt.SmoothTransformation))
-            return
-    label.setText("—")
+def _big_img_html(png: str) -> str:
+    """HTML <img> for a large hover preview, or '' if the file is missing."""
+    if png and os.path.exists(png):
+        return f'<img src="{png.replace(chr(92), "/")}" width="{HOVER_PX}">'
+    return ""
+
+
+class Thumb(QLabel):
+    """Fixed-size thumbnail. With spin=True it shows a neon spinning wheel until
+    its image arrives (decoding is slow), then the scaled image + a big hover
+    preview tooltip."""
+    def __init__(self, size: int = 56, spin: bool = False, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(f"border:1px solid {BORDER}; color:{MUTED};")
+        self._angle = 0
+        self._loading = spin
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        if spin:
+            self._timer.start(70)
+
+    def _tick(self):
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self._loading:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            r = min(self.width(), self.height()) // 4
+            cx, cy = self.width() // 2, self.height() // 2
+            pen = QPen(QColor(CYAN), 3)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.drawArc(cx - r, cy - r, 2 * r, 2 * r, self._angle * 16, 110 * 16)
+            p.end()
+
+    def set_image(self, png: str):
+        self._loading = False
+        self._timer.stop()
+        if png and os.path.exists(png):
+            pm = QPixmap(png)
+            if not pm.isNull():
+                self.setPixmap(pm.scaled(self.size(), Qt.KeepAspectRatio,
+                                         Qt.SmoothTransformation))
+                self.setToolTip(_big_img_html(png))
+                return
+        self.setText("—")
+
+
+def _preview_cell(thumb: "Thumb") -> QWidget:
+    """A thumbnail with a tiny 'hover to enlarge' caption beneath it."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(1)
+    cap = QLabel("hover to enlarge")
+    cap.setAlignment(Qt.AlignCenter)
+    cap.setStyleSheet(f"color:{MUTED}; font-size:8px;")
+    v.addWidget(thumb, alignment=Qt.AlignCenter)
+    v.addWidget(cap)
+    return w
 
 
 class PreviewWorker(QThread):
@@ -552,7 +603,7 @@ class TextureListPage(QWizardPage):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        thumb = _thumb_label()                    # original (decoded async)
+        thumb = Thumb(spin=True)                  # original (decoded async)
         name = QLabel(_basename(mount))
         name.setMinimumWidth(150)
         name.setWordWrap(True)
@@ -564,13 +615,13 @@ class TextureListPage(QWizardPage):
         iv.addWidget(name)
         iv.addWidget(status)
         btn = QPushButton("Choose…")
-        your = _thumb_label()                     # the replacement they pick
+        your = Thumb(spin=False)                  # the replacement they pick
         rec = {"mount": mount, "status": status, "thumb": thumb, "your": your}
         btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
-        h.addWidget(thumb)
+        h.addWidget(_preview_cell(thumb))
         h.addWidget(info, 1)
         h.addWidget(btn)
-        h.addWidget(your)
+        h.addWidget(_preview_cell(your))
         if removable:
             rm = QPushButton("✕")
             rm.setObjectName("rm")
@@ -594,7 +645,7 @@ class TextureListPage(QWizardPage):
     def _on_preview(self, mount, png):
         for r in self._rows:
             if r["mount"] == mount:
-                _set_thumb(r["thumb"], png)
+                r["thumb"].set_image(png)
                 return
 
     def _pick(self, rec):
@@ -610,12 +661,10 @@ class TextureListPage(QWizardPage):
         self.wizard().tex_items[rec["mount"]] = path
         rec["status"].setText("✓ " + Path(path).name)
         rec["status"].setStyleSheet(f"color:{GREEN}; font-weight:600;")
-        pm = QPixmap(path)
-        if not pm.isNull():
-            rec["your"].setPixmap(pm.scaled(rec["your"].size(),
-                                  Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
+        if QPixmap(path).isNull():
             rec["your"].setText("DDS")
+        else:
+            rec["your"].set_image(path)
         self.completeChanged.emit()
 
     def _remove(self, row, rec):
@@ -1028,7 +1077,7 @@ class CookTexturePage(QWizardPage):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        thumb = _thumb_label()
+        thumb = Thumb(spin=True)
         name = QLabel(_basename(mount))
         name.setMinimumWidth(150)
         name.setWordWrap(True)
@@ -1040,13 +1089,13 @@ class CookTexturePage(QWizardPage):
         iv.addWidget(name)
         iv.addWidget(status)
         btn = QPushButton("Choose…")
-        your = _thumb_label()
+        your = Thumb(spin=False)
         rec = {"mount": mount, "status": status, "thumb": thumb, "your": your}
         btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
-        h.addWidget(thumb)
+        h.addWidget(_preview_cell(thumb))
         h.addWidget(info, 1)
         h.addWidget(btn)
-        h.addWidget(your)
+        h.addWidget(_preview_cell(your))
         self._vbox.addWidget(row)
         self._rows.append(rec)
 
@@ -1058,7 +1107,7 @@ class CookTexturePage(QWizardPage):
     def _on_preview(self, mount, png):
         for r in self._rows:
             if r["mount"] == mount:
-                _set_thumb(r["thumb"], png)
+                r["thumb"].set_image(png)
                 return
 
     def _pick(self, rec):
@@ -1074,12 +1123,10 @@ class CookTexturePage(QWizardPage):
         self.wizard().cook_tex_items[rec["mount"]] = path
         rec["status"].setText("✓ " + Path(path).name)
         rec["status"].setStyleSheet(f"color:{GREEN}; font-weight:600;")
-        pm = QPixmap(path)
-        if not pm.isNull():
-            rec["your"].setPixmap(pm.scaled(rec["your"].size(),
-                                  Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
+        if QPixmap(path).isNull():
             rec["your"].setText("DDS")
+        else:
+            rec["your"].set_image(path)
 
     def isComplete(self):
         return True            # textures are optional — Next always available
@@ -1314,12 +1361,12 @@ class ExtractListPage(QWizardPage):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        thumb = _thumb_label(48)
+        thumb = Thumb(48, spin=True)
         cb = QCheckBox(_basename(mount))
         cb.setChecked(True)
         cb.toggled.connect(lambda *_: self.completeChanged.emit())
         rec = {"mount": mount, "cb": cb, "thumb": thumb}
-        h.addWidget(thumb)
+        h.addWidget(_preview_cell(thumb))
         h.addWidget(cb, 1)
         if removable:
             rm = QPushButton("✕")
@@ -1344,7 +1391,7 @@ class ExtractListPage(QWizardPage):
     def _on_preview(self, mount, png):
         for r in self._rows:
             if r["mount"] == mount:
-                _set_thumb(r["thumb"], png)
+                r["thumb"].set_image(png)
                 return
 
     def _remove(self, row, rec):
@@ -1689,6 +1736,7 @@ class CombineSelectPage(QWizardPage):
         if not asset.leaf.startswith("T_") or asset.mount in self._prev_pending:
             return
         self._prev_pending.add(asset.mount)
+        QToolTip.showText(QCursor.pos(), "Loading preview…")
         w = PakPreviewWorker(asset.pak, asset.mount, self)
         w.ready.connect(self._prev_ready)
         w.start()
@@ -1699,9 +1747,9 @@ class CombineSelectPage(QWizardPage):
         self._show_tip(png)
 
     def _show_tip(self, png):
-        if png and os.path.exists(png):
-            src = png.replace("\\", "/")   # HTML img needs forward slashes
-            QToolTip.showText(QCursor.pos(), f'<img src="{src}" width="160">')
+        html = _big_img_html(png)
+        if html:
+            QToolTip.showText(QCursor.pos(), html)
 
     def _checked(self):
         return [r["asset"] for r in self._rows if r["cb"].isChecked()]
