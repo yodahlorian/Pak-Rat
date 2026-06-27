@@ -595,6 +595,111 @@ def run_pipeline_multi(items: list[dict], progress=None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Combine mode — merge chosen assets from several existing paks into ONE pak.
+#
+# Pure repak (no injection / no UE): list each source pak, group its sidecars
+# into logical assets, let the user cherry-pick (conflict-aware — one winner per
+# content path), then unpack the picks and repack into a single drop-in pak.
+# Lets a player take the soda from mod A and the candy from mod B without having
+# to choose between whole paks, and outputs one clean shareable _P.pak.
+# ---------------------------------------------------------------------------
+_SIDECAR_EXTS = ("uasset", "uexp", "ubulk")
+
+
+@dataclass
+class PakAsset:
+    mount: str          # grouping + conflict key: entry path minus sidecar ext
+    kind: str           # mesh|texture|material|shader|other (best-effort)
+    entries: list       # actual pak entry paths to unpack (the sidecars)
+    pak: str            # source .pak this asset came from
+
+    @property
+    def leaf(self) -> str:
+        return self.mount.rsplit("/", 1)[-1]
+
+
+def list_mod_paks() -> list[str]:
+    """Every .pak currently installed in the game's ~mods folder, sorted.
+
+    Best-effort: returns [] if the game install can't be located — the combine
+    page still works via its 'Add pak…' browse button."""
+    try:
+        d = rr_mods_dir()
+    except Exception:
+        return []
+    try:
+        return sorted(str(p) for p in d.glob("*.pak") if p.is_file())
+    except Exception:
+        return []
+
+
+def pak_assets(pak_path: str) -> list["PakAsset"]:
+    """List a pak's logical assets: sidecars (uasset/uexp/ubulk) sharing a stem
+    are grouped into one asset; any other entry stands alone. Classified for
+    display. Raises (via _repak) if the pak can't be read."""
+    ensure_oodle()  # source paks may be Oodle-compressed
+    r = _repak("list", str(pak_path))
+    groups: dict[str, set] = {}
+    for ln in r.stdout.splitlines():
+        e = ln.strip().replace("\\", "/")
+        if not e:
+            continue
+        leaf = e.rsplit("/", 1)[-1]
+        ext = leaf.rsplit(".", 1)[-1].lower() if "." in leaf else ""
+        stem = e[: -(len(ext) + 1)] if ext in _SIDECAR_EXTS else e
+        groups.setdefault(stem, set()).add(e)
+    out = [PakAsset(mount=stem, kind=_classify(stem),
+                    entries=sorted(ents), pak=str(pak_path))
+           for stem, ents in groups.items()]
+    return sorted(out, key=lambda a: (a.kind, a.mount))
+
+
+def find_conflicts(selected: list["PakAsset"]) -> dict[str, list["PakAsset"]]:
+    """Group selected assets by content path; return only the paths chosen from
+    more than one pak — the real collisions that need a winner picked."""
+    by_mount: dict[str, list[PakAsset]] = {}
+    for a in selected:
+        by_mount.setdefault(a.mount, []).append(a)
+    return {m: v for m, v in by_mount.items() if len(v) > 1}
+
+
+def combine_paks(selected: list["PakAsset"], out_name: str | None = None,
+                 progress=None) -> str:
+    """Unpack each selected asset from its source pak and repack into ONE pak.
+
+    `selected` must already be conflict-resolved: at most one PakAsset per
+    content path (the chosen winner). Each asset's sidecars are unpacked under
+    their real content tree so one repak run yields a drop-in pak. Returns the
+    built pak path. Packs as the base format (V11 + base seed) — loose ~mods
+    paks aren't seed-enforced, but matching the base keeps it clean."""
+    def say(m):
+        if progress:
+            progress(m)
+    if not selected:
+        raise RuntimeError("Nothing selected to combine.")
+    dupes = find_conflicts(selected)
+    if dupes:
+        raise RuntimeError("Unresolved asset conflict(s): " + ", ".join(sorted(dupes)))
+    ensure_oodle()
+    work = Path(tempfile.mkdtemp(prefix="pakrat_combine_"))
+    stage = work / "stage"
+    stage.mkdir(parents=True, exist_ok=True)
+    n = len(selected)
+    for i, a in enumerate(selected, 1):
+        say(f"Pulling {a.leaf}  ({i}/{n})…")
+        args = ["unpack", "-o", str(stage), "-f"]
+        for e in a.entries:
+            args += ["-i", e]
+        _repak(*args, str(a.pak))
+    say("Packaging .pak…")
+    out_pak = work / finalize_pak_name(out_name or "Combined")
+    _repak("pack", "--version", PAK_VERSION, "--mount-point", PAK_MOUNT,
+           "--path-hash-seed", PAK_SEED, str(stage), str(out_pak))
+    say("Done.")
+    return str(out_pak)
+
+
+# ---------------------------------------------------------------------------
 # Final actions
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

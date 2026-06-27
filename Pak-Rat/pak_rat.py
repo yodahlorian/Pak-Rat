@@ -9,6 +9,8 @@ Four modes (chosen on ModePage):
   mesh     ModePage → AssetPage → ExtractPage → RequiredFilesPage → ProcessPage → FinishPage
   cook     ModePage → SetupPage → AssetPage → CookListPage → ProcessPage → FinishPage
   extract  ModePage → AssetPage → ExtractListPage  (hands back originals; no packaging)
+  combine  ModePage → CombineSourcePage → CombineSelectPage → ProcessPage → FinishPage
+           (cherry-pick assets from existing paks, conflict-aware, into one pak)
   regular & extract pack MANY items into one pak. SetupPage is always step 1 of the
   cook path (short-circuits instantly if already set up). Cook mode is shown only when
   an Unreal install is found — otherwise ModePage shows an "install UE 5.4.4" note.
@@ -37,7 +39,7 @@ import cook  # noqa: E402  (v2 UE cooking toolchain)
 # Page ids
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, \
-    PAGE_EXTRACTLIST = range(10)
+    PAGE_EXTRACTLIST, PAGE_COMBINESRC, PAGE_COMBINESEL = range(12)
 
 GREEN = "#2e9e44"
 APP_VERSION = "2.0.0"
@@ -67,6 +69,7 @@ class ModePage(QWizardPage):
         self.rb_mesh = QRadioButton("Mesh + Texture")
         self.rb_cook = QRadioButton("Cook Mesh from a 3D file  (FBX / OBJ / glTF / …)")
         self.rb_extract = QRadioButton("Extract Texture")
+        self.rb_combine = QRadioButton("Combine Mods")
         self.rb_regular.setChecked(True)
 
         self.group = QButtonGroup(self)
@@ -74,6 +77,7 @@ class ModePage(QWizardPage):
         self.group.addButton(self.rb_mesh, 1)
         self.group.addButton(self.rb_extract, 2)
         self.group.addButton(self.rb_cook, 3)
+        self.group.addButton(self.rb_combine, 4)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.rb_regular)
@@ -97,6 +101,13 @@ class ModePage(QWizardPage):
         lab3 = QLabel("    Pull an original texture out of the game to edit (PNG/DDS).")
         lab3.setStyleSheet("color:#888;")
         lay.addWidget(lab3)
+        lay.addSpacing(12)
+        lay.addWidget(self.rb_combine)
+        lab4 = QLabel("    Cherry-pick assets from mods you already have and merge "
+                      "them into one pak.")
+        lab4.setStyleSheet("color:#888;")
+        lab4.setWordWrap(True)
+        lay.addWidget(lab4)
         lay.addStretch(1)
 
         # Shown only when no Unreal Engine is installed (cooker hidden then).
@@ -129,14 +140,20 @@ class ModePage(QWizardPage):
             self.wizard().mode = "cook"
         elif self.rb_extract.isChecked():
             self.wizard().mode = "extract"
+        elif self.rb_combine.isChecked():
+            self.wizard().mode = "combine"
         else:
             self.wizard().mode = "regular"
 
     def nextId(self):
+        mode = getattr(self.wizard(), "mode", "regular")
         # Cooker path ALWAYS starts at the setup page (step 1). It short-circuits
         # instantly when the toolchain is already installed.
-        if getattr(self.wizard(), "mode", "regular") == "cook":
+        if mode == "cook":
             return PAGE_SETUP
+        # Combine has no single-asset picker — straight to choosing source paks.
+        if mode == "combine":
+            return PAGE_COMBINESRC
         return PAGE_ASSET
 
 
@@ -780,13 +797,14 @@ class PipelineWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, mode, mesh_plan, mesh_user_files,
-                 cook_items=None, tex_items=None):
+                 cook_items=None, tex_items=None, combine_selected=None):
         super().__init__()
         self.mode = mode
         self.mesh_plan = mesh_plan
         self.mesh_user_files = mesh_user_files
         self.cook_items = cook_items or {}
         self.tex_items = tex_items or {}
+        self.combine_selected = combine_selected or []
 
     def run(self):
         try:
@@ -798,6 +816,9 @@ class PipelineWorker(QThread):
             elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
+            elif self.mode == "combine":
+                pak = core.combine_paks(self.combine_selected,
+                                        progress=self.status.emit)
             else:  # regular texture mode — one or many textures into one pak
                 items = [{"texture": tex, "image": img}
                          for tex, img in self.tex_items.items()]
@@ -835,7 +856,7 @@ class ProcessPage(QWizardPage):
         self.worker = PipelineWorker(
             getattr(w, "mode", "regular"), getattr(w, "mesh_plan", None),
             getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}),
-            getattr(w, "tex_items", {}))
+            getattr(w, "tex_items", {}), getattr(w, "combine_selected", []))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)
@@ -891,6 +912,9 @@ class FinishPage(QWizardPage):
 
     def isFinalPage(self):
         return True
+
+    def nextId(self):
+        return -1  # truly the last page — no "Next", only the Go (Finish) button
 
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1028,208 @@ class ExtractListPage(QWizardPage):
 
 
 # ---------------------------------------------------------------------------
+# Combine mode — page 1: choose which paks to pull assets from
+# ---------------------------------------------------------------------------
+class CombineSourcePage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Choose the mods to combine")
+        self.setSubTitle("Pick the paks to pull assets from — your installed "
+                         "mods are listed; add more from disk if you need to.")
+        self._rows = []  # {path, cb}
+
+        self._container = QWidget()
+        self._vbox = QVBoxLayout(self._container)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._container)
+
+        self.add_btn = QPushButton("➕  Add a pak from disk…")
+        self.add_btn.clicked.connect(self._add_from_disk)
+        self.hint = QLabel("Pick two or more to mix and match. If two mods touch "
+                           "the same asset, you’ll choose the winner on the next "
+                           "step.")
+        self.hint.setStyleSheet("color:#888;")
+        self.hint.setWordWrap(True)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(scroll)
+        lay.addWidget(self.add_btn)
+        lay.addWidget(self.hint)
+
+    def initializePage(self):
+        while self._vbox.count():
+            it = self._vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._rows = []
+        installed = core.list_mod_paks()
+        if installed:
+            head = QLabel("Installed in Retro Rewind ~mods:")
+            head.setStyleSheet("font-weight:600;")
+            self._vbox.addWidget(head)
+            for p in installed:
+                self._add_row(p)
+        else:
+            none = QLabel("No installed mods found — use “Add a pak from disk…”.")
+            none.setStyleSheet("color:#c08a2e;")
+            self._vbox.addWidget(none)
+        self._vbox.addStretch(1)
+        self.completeChanged.emit()
+
+    def _add_row(self, path, checked=False):
+        if any(r["path"] == path for r in self._rows):
+            return
+        cb = QCheckBox(Path(path).name)
+        cb.setToolTip(path)
+        cb.setChecked(checked)
+        cb.toggled.connect(lambda *_: self.completeChanged.emit())
+        n = self._vbox.count()
+        if n and self._vbox.itemAt(n - 1).spacerItem():
+            self._vbox.insertWidget(n - 1, cb)   # before the trailing stretch
+        else:
+            self._vbox.addWidget(cb)
+        self._rows.append({"path": path, "cb": cb})
+
+    def _add_from_disk(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add pak(s)", str(Path(os.path.expanduser("~"))),
+            "Unreal paks (*.pak);;All files (*)")
+        for p in paths:
+            self._add_row(p, checked=True)
+        self.completeChanged.emit()
+
+    def selected_paks(self):
+        return [r["path"] for r in self._rows if r["cb"].isChecked()]
+
+    def isComplete(self):
+        return bool(self.selected_paks())
+
+    def validatePage(self):
+        paks = self.selected_paks()
+        if not paks:
+            return False
+        self.wizard().combine_sources = paks
+        return True
+
+    def nextId(self):
+        return PAGE_COMBINESEL
+
+
+# ---------------------------------------------------------------------------
+# Combine mode — page 2: cherry-pick assets (conflict-aware)
+# ---------------------------------------------------------------------------
+class CombineSelectPage(QWizardPage):
+    _KIND_TAG = {"mesh": "MESH", "texture": "TEX", "material": "MAT",
+                 "shader": "SHD", "other": "···"}
+
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Pick the assets to include")
+        self.setSubTitle("Tick what you want from each mod. ⚠ marks an asset more "
+                         "than one mod changes — you’ll pick the winner on Next.")
+        self._rows = []   # {asset: PakAsset, cb}
+
+        self._container = QWidget()
+        self._vbox = QVBoxLayout(self._container)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._container)
+
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#888;")
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(scroll)
+        lay.addWidget(self.status)
+
+    def initializePage(self):
+        while self._vbox.count():
+            it = self._vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._rows = []
+        self.status.setText("")
+        paks = getattr(self.wizard(), "combine_sources", [])
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        per_pak, overlap = [], {}
+        try:
+            for p in paks:
+                try:
+                    assets = core.pak_assets(p)
+                except Exception as e:  # noqa: BLE001
+                    assets = []
+                    self.status.setText(f"Couldn’t read {Path(p).name}: {e}")
+                per_pak.append((p, assets))
+                for a in assets:
+                    overlap[a.mount] = overlap.get(a.mount, 0) + 1
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        for p, assets in per_pak:
+            head = QLabel(Path(p).name)
+            head.setStyleSheet("font-weight:600; margin-top:6px;")
+            self._vbox.addWidget(head)
+            sel_all = QCheckBox("    (select all from this mod)")
+            sel_all.setStyleSheet("color:#888;")
+            self._vbox.addWidget(sel_all)
+            group_cbs = []
+            for a in assets:
+                tag = self._KIND_TAG.get(a.kind, "···")
+                warn = "  ⚠" if overlap.get(a.mount, 0) > 1 else ""
+                cb = QCheckBox(f"    [{tag}]  {a.leaf}{warn}")
+                if warn:
+                    cb.setStyleSheet("color:#c08a2e;")
+                cb.toggled.connect(lambda *_: self.completeChanged.emit())
+                self._vbox.addWidget(cb)
+                self._rows.append({"asset": a, "cb": cb})
+                group_cbs.append(cb)
+            sel_all.toggled.connect(
+                lambda on, cbs=group_cbs: [c.setChecked(on) for c in cbs])
+        self._vbox.addStretch(1)
+        self.completeChanged.emit()
+
+    def _checked(self):
+        return [r["asset"] for r in self._rows if r["cb"].isChecked()]
+
+    def isComplete(self):
+        return bool(self._checked())
+
+    def validatePage(self):
+        selected = self._checked()
+        if not selected:
+            return False
+        conflicts = core.find_conflicts(selected)
+        winners = {}
+        for mount, options in conflicts.items():
+            leaf = mount.rsplit("/", 1)[-1]
+            labels = [Path(a.pak).name for a in options]
+            choice, ok = QInputDialog.getItem(
+                self, "Resolve conflict",
+                f"“{leaf}” is changed by more than one mod.\n"
+                "Which one should win?", labels, 0, False)
+            if not ok:
+                return False  # cancelled — stay on the page
+            winners[mount] = labels.index(choice)
+        resolved, seen = [], set()
+        for a in selected:
+            if a.mount in conflicts:
+                if a.mount in seen:
+                    continue
+                seen.add(a.mount)
+                resolved.append(conflicts[a.mount][winners[a.mount]])
+            else:
+                resolved.append(a)
+        self.wizard().combine_selected = resolved
+        return True
+
+    def nextId(self):
+        return PAGE_PROCESS
+
+
+# ---------------------------------------------------------------------------
 # Wizard
 # ---------------------------------------------------------------------------
 class PakRatWizard(QWizard):
@@ -1016,6 +1242,8 @@ class PakRatWizard(QWizard):
         self.mesh_user_files = {}
         self.cook_items = {}
         self.tex_items = {}
+        self.combine_sources = []
+        self.combine_selected = []
         self.cook_available = None
 
         self.setWindowTitle(f"Pak Rat v{APP_VERSION}")
@@ -1035,11 +1263,15 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_SETUP, SetupPage())
         self.setPage(PAGE_COOKINPUT, CookListPage())
         self.setPage(PAGE_EXTRACTLIST, ExtractListPage())
+        self.setPage(PAGE_COMBINESRC, CombineSourcePage())
+        self.setPage(PAGE_COMBINESEL, CombineSelectPage())
         self.setStartId(PAGE_MODE)
 
     def _ask_pak_name(self) -> str | None:
         """Prompt for the mod's file name. None if the user cancels."""
-        if self.target_spec:
+        if getattr(self, "mode", "") == "combine":
+            leaf = "Combined"
+        elif self.target_spec:
             leaf = _basename(self.target_spec.asset)
         elif getattr(self, "mesh_plan", None):
             leaf = _basename(self.mesh_plan.mesh)
