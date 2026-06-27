@@ -567,10 +567,13 @@ def cook_mesh(env: CookEnv, src_mesh: str, target_mesh_mount: str,
                        progress=progress)[0]
 
 
-def run_cook_pipeline_multi(items: list[dict], progress=None) -> str:
+def run_cook_pipeline_multi(items: list[dict], tex_items: dict | None = None,
+                            progress=None) -> str:
     """Cook every item and pack them into ONE .pak. Reuses core's repak.
 
-    items: [{'src','target'}, …]. Returns the built .pak path.
+    items: [{'src','target'}, …]. tex_items: optional {texture_mount: image_path}
+    to swap alongside the cooked mesh(es) — a new mesh usually wants new textures.
+    Returns the built .pak path.
     """
     import shutil
 
@@ -595,6 +598,11 @@ def run_cook_pipeline_multi(items: list[dict], progress=None) -> str:
         shutil.copy2(c["uasset"], d / f"{leaf}.uasset")
         if c["uexp"]:
             shutil.copy2(c["uexp"], d / f"{leaf}.uexp")
+
+    # Optional textures for the new mesh — injected into the SAME V11 pak.
+    for mount, img in (tex_items or {}).items():
+        say("Injecting texture %s…" % mount.rsplit("/", 1)[-1], None)
+        core.stage_texture(mount, img, stage)
 
     first = cooked[0]["mount"].rsplit("/", 1)[-1]
     label = first if len(cooked) == 1 else f"{first}_plus{len(cooked) - 1}"

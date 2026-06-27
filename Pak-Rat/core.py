@@ -464,6 +464,88 @@ def export_many(assets: list[str], dest_dir: str, fmt: str = "png",
     return written
 
 
+def mesh_overlay_assets(mesh: str) -> list[str]:
+    """A mesh's editable dependencies for extraction: its MaterialInstance (MI_)
+    assets AND the base-colour (_bc) textures those materials use. One pak walk;
+    materials first (then textures), as sorted mount paths."""
+    mesh = mesh.strip().rstrip("/")
+    ensure_oodle()
+    mats, texs = set(), set()
+    with tempfile.TemporaryDirectory() as tmp:
+        ua = _extract_asset(mesh, tmp)
+        if not ua:
+            return []
+        for ref in _scan_refs(ua, ua[:-7] + ".uexp"):
+            if _classify(ref) != "material":
+                continue
+            mats.add(ref)
+            mua = _extract_asset(ref, tmp)
+            if mua:
+                for r2 in _scan_refs(mua, mua[:-7] + ".uexp"):
+                    if _classify(r2) == "texture" and r2.endswith("_bc"):
+                        texs.add(r2)
+    return sorted(mats) + sorted(texs)
+
+
+def related_assets(asset: str, limit: int = 16) -> list[str]:
+    """Siblings to auto-include when extracting `asset`. Stays within the
+    canonical set — base-colour textures (T_*_bc), the meshes folder, and (for a
+    mesh) the materials it depends on. Never _n/_ram/_d suffix maps or shaders.
+
+    Texture -> other T_*_bc in the same folder. Mesh -> its MI_ materials + the
+    _bc textures they use."""
+    kind = _classify(asset)
+    if kind == "texture":
+        folder = asset.rsplit("/", 1)[0]
+        return sorted(m for m in load_assets()
+                      if m != asset and m.rsplit("/", 1)[0] == folder)[:limit]
+    if kind == "mesh":
+        return mesh_overlay_assets(asset)[:limit]
+    return []
+
+
+def export_assets(assets: list[str], dest_dir: str, fmt: str = "png",
+                  progress=None) -> list[str]:
+    """Extract several assets to dest_dir. Textures are decoded to `fmt`
+    (PNG/DDS); meshes (and anything else) are handed back as their raw cooked
+    sidecars (.uasset/.uexp/.ubulk), flattened to dest_dir/<leaf>.<ext>. Skips
+    failures so one bad asset can't sink the batch. Returns written paths."""
+    written = []
+    Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    ensure_oodle()
+    for i, asset in enumerate(assets, 1):
+        leaf = asset.rstrip("/").split("/")[-1]
+        if progress:
+            progress(f"Extracting {leaf}  ({i}/{len(assets)})…")
+        try:
+            if _classify(asset) == "texture":
+                spec = None
+                try:
+                    spec = prepare_target(asset)
+                    written.append(export_texture(
+                        spec, str(Path(dest_dir) / f"{leaf}.{fmt}"), fmt))
+                finally:
+                    cleanup_target(spec)
+            else:  # mesh / material / other -> raw cooked sidecars
+                tmp = tempfile.mkdtemp(prefix="pakrat_extract_")
+                try:
+                    ua = _extract_asset(asset, tmp)
+                    if ua:
+                        base = ua[:-7]  # strip .uasset
+                        for e in ("uasset", "uexp", "ubulk"):
+                            src = Path(base + "." + e)
+                            if src.is_file():
+                                dst = Path(dest_dir) / f"{leaf}.{e}"
+                                shutil.copy2(src, dst)
+                                written.append(str(dst))
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+        except Exception as e:  # noqa: BLE001
+            if progress:
+                progress(f"  ! skipped {leaf}: {e}")
+    return written
+
+
 # ---------------------------------------------------------------------------
 # Replacement image validation + prep
 # ---------------------------------------------------------------------------
@@ -495,6 +577,96 @@ def prepare_image(path: str, spec: TargetSpec) -> ImageInfo:
     im.save(out)
     return ImageInfo(path=path, ext=ext, encoding=spec.dxgi_format,
                      prepared_png=str(out), spec=spec)
+
+
+def decode_preview(mount: str) -> str | None:
+    """Best-effort decoded PNG thumbnail of a texture asset.
+
+    Returns a path to a standalone temp PNG, or None for non-textures / any
+    failure. Self-contained: extracts, decodes, copies the preview out, and
+    cleans its own scratch dir so nothing accumulates.
+    """
+    leaf = mount.rstrip("/").split("/")[-1]
+    if not leaf.startswith("T_"):          # only 2D textures have a preview
+        return None
+    spec = None
+    try:
+        spec = prepare_target(mount)
+        src = getattr(spec, "preview_png", None)
+        if src and os.path.isfile(src):
+            fd, dst = tempfile.mkstemp(suffix=".png", prefix="pakrat_prev_")
+            os.close(fd)
+            shutil.copy2(src, dst)
+            return dst
+    except Exception:
+        return None
+    finally:
+        cleanup_target(spec)
+    return None
+
+
+def decode_pak_preview(pak_path: str, mount: str) -> str | None:
+    """Decoded PNG preview of a texture asset AS IT EXISTS IN A GIVEN pak.
+
+    Used for combine-mode hover previews (shows the modded texture, not the base
+    game's). None for non-textures / any failure. Self-contained temp output.
+    """
+    leaf = mount.rstrip("/").split("/")[-1]
+    if not leaf.startswith("T_"):
+        return None
+    work = None
+    try:
+        ensure_oodle()
+        work = Path(tempfile.mkdtemp(prefix="pakrat_hov_"))
+        unpacked = work / "u"
+        _repak("unpack", "-o", str(unpacked),
+               "-i", f"{mount}.uasset", "-i", f"{mount}.uexp",
+               "-i", f"{mount}.ubulk", str(pak_path))
+        uasset = unpacked / (mount + ".uasset")
+        if not uasset.is_file():
+            return None
+        out = work / "p"
+        _injector([str(uasset), "--mode", "export", "--version", UE_VERSION,
+                   "--export_as", "png", "--save_folder", str(out)])
+        hits = list(out.rglob("*.png"))
+        if not hits:
+            return None
+        fd, dst = tempfile.mkstemp(suffix=".png", prefix="pakrat_hov_")
+        os.close(fd)
+        shutil.copy2(hits[0], dst)
+        return dst
+    except Exception:
+        return None
+    finally:
+        if work and os.path.isdir(work):
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def stage_texture(texture_mount: str, image_path: str, stage_dir, progress=None):
+    """Extract a game texture, inject the user's image, and copy the resulting
+    uasset/uexp/ubulk into stage_dir under the texture's mount tree.
+
+    Shared by the texture pipeline and the cooker (so a cooked mesh can ship
+    with its new textures in the same V11 pak). Cleans its own scratch.
+    """
+    tex = texture_mount.rstrip("/")
+    leaf = tex.split("/")[-1]
+    spec = None
+    try:
+        spec = prepare_target(tex)
+        prepared = prepare_image(image_path, spec)
+        injected = Path(spec.work_dir) / "injected"
+        _injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
+                   "--version", UE_VERSION, "--save_folder", str(injected)])
+        rel_parts = tex.split("/")[:-1]
+        dst = Path(stage_dir).joinpath(*rel_parts)
+        dst.mkdir(parents=True, exist_ok=True)
+        for ext in ("uasset", "uexp", "ubulk"):
+            src = injected / f"{leaf}.{ext}"
+            if src.is_file():
+                shutil.copy2(src, dst / src.name)
+    finally:
+        cleanup_target(spec)
 
 
 def validate_mesh_ext(path: str) -> bool:

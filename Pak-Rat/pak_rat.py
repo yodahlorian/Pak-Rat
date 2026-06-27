@@ -24,12 +24,12 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon, QPixmap
+from PySide6.QtGui import QColor, QCursor, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QFileDialog,
-    QHBoxLayout, QInputDialog, QLabel, QMessageBox, QProgressBar, QPushButton,
-    QRadioButton, QScrollArea, QSplashScreen, QVBoxLayout, QWidget, QWizard,
-    QWizardPage,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QProgressBar,
+    QPushButton, QRadioButton, QScrollArea, QSplashScreen, QToolTip, QVBoxLayout,
+    QWidget, QWizard, QWizardPage,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -38,11 +38,85 @@ import cook  # noqa: E402  (v2 UE cooking toolchain)
 
 # Page ids
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
-    PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, \
-    PAGE_EXTRACTLIST, PAGE_COMBINESRC, PAGE_COMBINESEL = range(12)
+    PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
+    PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
+    PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
 
-GREEN = "#2e9e44"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
+
+# ---------------------------------------------------------------------------
+# Synthwave theme — palette sampled straight from the app icon (neon rat badge):
+# near-black violet ground, neon cyan + magenta accents.
+# ---------------------------------------------------------------------------
+BG      = "#0B0518"   # window ground (icon background)
+PANEL   = "#160C2A"   # raised panels / input fields
+TEXT    = "#ECE9F7"   # primary text
+MUTED   = "#8C86A8"   # disabled / hints
+CYAN    = "#10EBF7"   # primary neon accent
+MAGENTA = "#F21CE0"   # secondary neon accent
+BORDER  = "#2A2350"   # subtle outlines
+GREEN   = "#27E0A0"   # success ✓ (neon, tuned to fit the palette)
+
+_QSS = f"""
+QPushButton {{
+    background: {PANEL}; color: {CYAN};
+    border: 1px solid {CYAN}; border-radius: 6px; padding: 6px 14px;
+}}
+QPushButton:hover    {{ background: {CYAN}; color: {BG}; }}
+QPushButton:pressed  {{ background: {MAGENTA}; border-color: {MAGENTA}; color: {BG}; }}
+QPushButton:disabled {{ color: {MUTED}; border-color: {BORDER}; background: {PANEL}; }}
+QComboBox, QLineEdit, QAbstractItemView {{
+    background: {PANEL}; color: {TEXT};
+    border: 1px solid {BORDER}; border-radius: 6px; padding: 4px 6px;
+    selection-background-color: {CYAN}; selection-color: {BG};
+}}
+QComboBox:hover, QLineEdit:focus {{ border-color: {CYAN}; }}
+QProgressBar {{
+    border: 1px solid {BORDER}; border-radius: 6px;
+    background: {PANEL}; text-align: center; color: {TEXT};
+}}
+QProgressBar::chunk {{
+    border-radius: 5px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                               stop:0 {CYAN}, stop:1 {MAGENTA});
+}}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollBar:vertical {{ background: {BG}; width: 12px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: {BORDER}; border-radius: 6px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: {CYAN}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QPushButton#rm {{
+    padding: 0; min-width: 26px; max-width: 26px; min-height: 24px;
+    color: {MAGENTA}; border: 1px solid {MAGENTA};
+    font-weight: bold; font-size: 14px;
+}}
+QPushButton#rm:hover {{ background: {MAGENTA}; color: {BG}; }}
+"""
+
+
+def apply_theme(app):
+    """Dark synthwave look drawn from the icon's palette (Fusion + accents)."""
+    app.setStyle("Fusion")
+    pal = QPalette()
+    pal.setColor(QPalette.Window, QColor(BG))
+    pal.setColor(QPalette.WindowText, QColor(TEXT))
+    pal.setColor(QPalette.Base, QColor(PANEL))
+    pal.setColor(QPalette.AlternateBase, QColor(BG))
+    pal.setColor(QPalette.Text, QColor(TEXT))
+    pal.setColor(QPalette.Button, QColor(PANEL))
+    pal.setColor(QPalette.ButtonText, QColor(TEXT))
+    pal.setColor(QPalette.ToolTipBase, QColor(PANEL))
+    pal.setColor(QPalette.ToolTipText, QColor(TEXT))
+    pal.setColor(QPalette.Highlight, QColor(CYAN))
+    pal.setColor(QPalette.HighlightedText, QColor(BG))
+    pal.setColor(QPalette.Link, QColor(CYAN))
+    pal.setColor(QPalette.PlaceholderText, QColor(MUTED))
+    for grp in (QPalette.Disabled,):
+        pal.setColor(grp, QPalette.Text, QColor(MUTED))
+        pal.setColor(grp, QPalette.ButtonText, QColor(MUTED))
+        pal.setColor(grp, QPalette.WindowText, QColor(MUTED))
+    app.setPalette(pal)
+    app.setStyleSheet(_QSS)
 
 
 def resource_path(name: str) -> str:
@@ -54,6 +128,46 @@ def resource_path(name: str) -> str:
 def _basename(asset: str) -> str:
     """Leaf name of an asset path, e.g. .../textures/MI_Detail_01 -> MI_Detail_01."""
     return asset.rstrip("/").split("/")[-1]
+
+
+def _thumb_label(size: int = 56) -> QLabel:
+    """A fixed-size bordered placeholder for an asset thumbnail."""
+    lab = QLabel("…")
+    lab.setFixedSize(size, size)
+    lab.setAlignment(Qt.AlignCenter)
+    lab.setStyleSheet(f"border:1px solid {BORDER}; color:{MUTED};")
+    return lab
+
+
+def _set_thumb(label: QLabel, png_path: str):
+    """Fill a thumbnail label with a scaled image, or a dash if none."""
+    if png_path and os.path.exists(png_path):
+        pm = QPixmap(png_path)
+        if not pm.isNull():
+            label.setPixmap(pm.scaled(label.size(), Qt.KeepAspectRatio,
+                                      Qt.SmoothTransformation))
+            return
+    label.setText("—")
+
+
+class PreviewWorker(QThread):
+    """Decodes texture previews off the GUI thread; emits one signal per asset.
+
+    Parented to its page so Qt keeps it alive (no manual ref-tracking).
+    """
+    ready = Signal(str, str)   # (mount, png path; "" = no preview)
+
+    def __init__(self, mounts, parent=None):
+        super().__init__(parent)
+        self._mounts = list(mounts)
+
+    def run(self):
+        for m in self._mounts:
+            try:
+                p = core.decode_preview(m) or ""
+            except Exception:
+                p = ""
+            self.ready.emit(m, p)
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +182,7 @@ class ModePage(QWizardPage):
         self.rb_regular = QRadioButton("Regular Texture")
         self.rb_mesh = QRadioButton("Mesh + Texture")
         self.rb_cook = QRadioButton("Cook Mesh from a 3D file  (FBX / OBJ / glTF / …)")
-        self.rb_extract = QRadioButton("Extract Texture")
+        self.rb_extract = QRadioButton("Extract Asset")
         self.rb_combine = QRadioButton("Combine Mods")
         self.rb_regular.setChecked(True)
 
@@ -98,8 +212,10 @@ class ModePage(QWizardPage):
         lay.addWidget(self.cook_lab)
         lay.addSpacing(12)
         lay.addWidget(self.rb_extract)
-        lab3 = QLabel("    Pull an original texture out of the game to edit (PNG/DDS).")
+        lab3 = QLabel("    Pull an original mesh or texture out of the game to edit "
+                      "(textures as PNG/DDS, meshes as .uasset). Siblings auto-included.")
         lab3.setStyleSheet("color:#888;")
+        lab3.setWordWrap(True)
         lay.addWidget(lab3)
         lay.addSpacing(12)
         lay.addWidget(self.rb_combine)
@@ -166,6 +282,7 @@ class AssetPage(QWizardPage):
         self.setTitle("Select the texture")
         self._resolved_for = None
         self._mesh_set = set()
+        self._mount_by_label = {}   # leaf shown in combo -> full mount path
 
         self.combo = QComboBox()
         self.combo.setEditable(True)
@@ -176,6 +293,13 @@ class AssetPage(QWizardPage):
         self.combo.setMaximumWidth(560)
         self.combo.currentTextChanged.connect(self.completeChanged)
         self.combo.currentTextChanged.connect(self._on_primary_changed)
+        self.combo.currentTextChanged.connect(self._sync_asset)
+
+        # Hidden field carrying the FULL mount path — the combo may show only the
+        # leaf name (so long paths don't run off-screen), but downstream needs
+        # the full path. registerField points here, not at the visible combo.
+        self._asset = QLineEdit()
+        self._asset.setVisible(False)
 
         # Second dropdown — mesh mode only: the auto-resolved overlay texture.
         self.tex_lbl = QLabel("Overlay texture:")
@@ -186,30 +310,48 @@ class AssetPage(QWizardPage):
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel("Start typing to filter, or pick from the list:"))
         lay.addWidget(self.combo)
+        lay.addWidget(self._asset)
         lay.addSpacing(8)
         lay.addWidget(self.tex_lbl)
         lay.addWidget(self.combo2)
         lay.addStretch(1)
 
-        self.registerField("asset", self.combo, "currentText",
-                            self.combo.currentTextChanged)
+        self.registerField("asset", self._asset)
         self.registerField("overlay_tex", self.combo2, "currentText",
                             self.combo2.currentTextChanged)
 
     def _is_mesh(self):
         return getattr(self.wizard(), "mode", "regular") == "mesh"
 
+    def _sync_asset(self, text):
+        t = text.strip()
+        self._asset.setText(self._mount_by_label.get(t, t))
+
     def initializePage(self):
         mode = getattr(self.wizard(), "mode", "regular")
         mesh_like = mode in ("mesh", "cook")
-        items = core.load_meshes() if mesh_like else core.load_assets()
+        if mode == "extract":           # extract works on meshes AND textures
+            items = sorted(set(core.load_meshes()) | set(core.load_assets()))
+        else:
+            items = core.load_meshes() if mesh_like else core.load_assets()
+        # Show just the leaf name everywhere except mesh mode (left as-is).
+        leaf_display = (mode != "mesh")
         self._resolved_for = None
         self._mesh_set = set(items) if mode == "mesh" else set()
+        self._mount_by_label = {}
+        self.combo.blockSignals(True)
         self.combo.clear()
-        self.combo.addItems(items)
+        labels = []
+        for mount in items:
+            label = _basename(mount) if leaf_display else mount
+            self.combo.addItem(label, mount)
+            self._mount_by_label[label] = mount
+            labels.append(label)
         self.combo.setCurrentIndex(-1)
         self.combo.setEditText("")
-        completer = QCompleter(items, self.combo)
+        self.combo.blockSignals(False)
+        self._asset.setText("")
+        completer = QCompleter(labels, self.combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
         completer.setCompletionMode(QCompleter.PopupCompletion)
@@ -226,8 +368,8 @@ class AssetPage(QWizardPage):
             self.setTitle("Select the mesh")
             self.setSubTitle("Pick the mesh, then its overlay texture.")
         elif mode == "extract":
-            self.setTitle("Select the texture to extract")
-            self.setSubTitle("Pick the texture you want to pull out of the game.")
+            self.setTitle("Select the asset to extract")
+            self.setSubTitle("Pick a mesh or texture to pull out of the game.")
         else:
             self.setTitle("Select the texture")
             self.setSubTitle("Pick the texture you want to replace.")
@@ -402,6 +544,7 @@ class TextureListPage(QWizardPage):
         self._vbox.addStretch(1)
         self._stretch_added = True
         self.completeChanged.emit()
+        self._start_previews()
 
     def _add_row(self, mount, removable):
         if any(r["mount"] == mount for r in self._rows):
@@ -409,19 +552,28 @@ class TextureListPage(QWizardPage):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
-        lbl = QLabel(f"[TEX]  {_basename(mount)}")
-        lbl.setMinimumWidth(230)
-        status = QLabel("—")
-        status.setStyleSheet("color:#888;")
-        btn = QPushButton("Choose PNG / DDS…")
-        rec = {"mount": mount, "status": status}
+        thumb = _thumb_label()                    # original (decoded async)
+        name = QLabel(_basename(mount))
+        name.setMinimumWidth(150)
+        name.setWordWrap(True)
+        status = QLabel("no image yet")
+        status.setStyleSheet(f"color:{MUTED};")
+        info = QWidget()
+        iv = QVBoxLayout(info)
+        iv.setContentsMargins(0, 0, 0, 0)
+        iv.addWidget(name)
+        iv.addWidget(status)
+        btn = QPushButton("Choose…")
+        your = _thumb_label()                     # the replacement they pick
+        rec = {"mount": mount, "status": status, "thumb": thumb, "your": your}
         btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
-        h.addWidget(lbl)
+        h.addWidget(thumb)
+        h.addWidget(info, 1)
         h.addWidget(btn)
-        h.addWidget(status, 1)
+        h.addWidget(your)
         if removable:
             rm = QPushButton("✕")
-            rm.setFixedWidth(28)
+            rm.setObjectName("rm")
             rm.clicked.connect(lambda _=False, row=row, rec=rec: self._remove(row, rec))
             h.addWidget(rm)
         if self._stretch_added:
@@ -429,6 +581,21 @@ class TextureListPage(QWizardPage):
         else:
             self._vbox.addWidget(row)
         self._rows.append(rec)
+        if self._stretch_added:                   # live add → preview just this one
+            w = PreviewWorker([mount], self)
+            w.ready.connect(self._on_preview)
+            w.start()
+
+    def _start_previews(self):
+        w = PreviewWorker([r["mount"] for r in self._rows], self)
+        w.ready.connect(self._on_preview)
+        w.start()
+
+    def _on_preview(self, mount, png):
+        for r in self._rows:
+            if r["mount"] == mount:
+                _set_thumb(r["thumb"], png)
+                return
 
     def _pick(self, rec):
         path, _ = QFileDialog.getOpenFileName(
@@ -443,6 +610,12 @@ class TextureListPage(QWizardPage):
         self.wizard().tex_items[rec["mount"]] = path
         rec["status"].setText("✓ " + Path(path).name)
         rec["status"].setStyleSheet(f"color:{GREEN}; font-weight:600;")
+        pm = QPixmap(path)
+        if not pm.isNull():
+            rec["your"].setPixmap(pm.scaled(rec["your"].size(),
+                                  Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            rec["your"].setText("DDS")
         self.completeChanged.emit()
 
     def _remove(self, row, rec):
@@ -613,7 +786,9 @@ class SetupPage(QWizardPage):
         self.info.setText(
             f"{ue_txt}\n\nPak Rat will download a portable Blender (~370 MB) and "
             "build a small cooking project. Nothing is installed system-wide; it "
-            "all lives in your user folder and is reused next time.")
+            "all lives in your user folder and is reused next time.\n\n"
+            "(You may see an Unreal Engine window flash open during cooking — "
+            "that's normal.)")
         # Next stays disabled via isComplete() until setup finishes.
         wiz.button(QWizard.BackButton).setEnabled(False)
         self.worker = SetupWorker()
@@ -739,7 +914,7 @@ class CookListPage(QWizardPage):
         h.addWidget(status, 1)
         if kind != "target":
             rm = QPushButton("✕")
-            rm.setFixedWidth(28)
+            rm.setObjectName("rm")
             rm.clicked.connect(lambda _=False, row=row, rec=rec: self._remove(row, rec))
             h.addWidget(rm)
 
@@ -785,6 +960,131 @@ class CookListPage(QWizardPage):
         return bool(getattr(self.wizard(), "cook_items", {}))
 
     def nextId(self):
+        return PAGE_COOKTEX
+
+
+# ---------------------------------------------------------------------------
+# Cook texture page (cook mode) — OPTIONAL textures for the freshly cooked mesh.
+# Seeded from the base-colour textures the target mesh(es) use. Skippable.
+# ---------------------------------------------------------------------------
+class CookTexturePage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Textures for your mesh  (optional)")
+        self.setSubTitle("A new mesh usually wants new textures — swap any of "
+                         "these, or just hit Next to skip.")
+        self._rows = []
+
+        self._container = QWidget()
+        self._vbox = QVBoxLayout(self._container)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._container)
+
+        self.hint = QLabel("")
+        self.hint.setStyleSheet(f"color:{MUTED};")
+        self.hint.setWordWrap(True)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(scroll)
+        lay.addWidget(self.hint)
+
+    def initializePage(self):
+        while self._vbox.count():
+            it = self._vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._rows = []
+        wiz = self.wizard()
+        wiz.cook_tex_items = {}
+        targets = list(getattr(wiz, "cook_items", {}).keys())
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        seen, mounts = set(), []
+        try:
+            for tgt in targets:
+                try:
+                    for t in core.resolve_overlay_textures(tgt):
+                        if t not in seen:
+                            seen.add(t)
+                            mounts.append(t)
+                except Exception:
+                    pass
+        finally:
+            QApplication.restoreOverrideCursor()
+        if mounts:
+            self.hint.setText("These are the textures your target mesh uses. "
+                              "Pick replacements for any you want changed.")
+            for m in mounts:
+                self._add_row(m)
+        else:
+            self.hint.setText("No textures auto-detected for this mesh — you can "
+                              "skip and texture it later via Regular Texture.")
+        self._vbox.addStretch(1)
+        self.completeChanged.emit()
+        self._start_previews()
+
+    def _add_row(self, mount):
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        thumb = _thumb_label()
+        name = QLabel(_basename(mount))
+        name.setMinimumWidth(150)
+        name.setWordWrap(True)
+        status = QLabel("unchanged")
+        status.setStyleSheet(f"color:{MUTED};")
+        info = QWidget()
+        iv = QVBoxLayout(info)
+        iv.setContentsMargins(0, 0, 0, 0)
+        iv.addWidget(name)
+        iv.addWidget(status)
+        btn = QPushButton("Choose…")
+        your = _thumb_label()
+        rec = {"mount": mount, "status": status, "thumb": thumb, "your": your}
+        btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
+        h.addWidget(thumb)
+        h.addWidget(info, 1)
+        h.addWidget(btn)
+        h.addWidget(your)
+        self._vbox.addWidget(row)
+        self._rows.append(rec)
+
+    def _start_previews(self):
+        w = PreviewWorker([r["mount"] for r in self._rows], self)
+        w.ready.connect(self._on_preview)
+        w.start()
+
+    def _on_preview(self, mount, png):
+        for r in self._rows:
+            if r["mount"] == mount:
+                _set_thumb(r["thumb"], png)
+                return
+
+    def _pick(self, rec):
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Texture for {_basename(rec['mount'])}",
+            _basename(rec["mount"]), "Images (*.png *.dds);;All files (*)")
+        if not path:
+            return
+        if not core.validate_image_ext(path):
+            QMessageBox.warning(self, "Wrong file type",
+                                "Please choose a PNG or DDS file.")
+            return
+        self.wizard().cook_tex_items[rec["mount"]] = path
+        rec["status"].setText("✓ " + Path(path).name)
+        rec["status"].setStyleSheet(f"color:{GREEN}; font-weight:600;")
+        pm = QPixmap(path)
+        if not pm.isNull():
+            rec["your"].setPixmap(pm.scaled(rec["your"].size(),
+                                  Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            rec["your"].setText("DDS")
+
+    def isComplete(self):
+        return True            # textures are optional — Next always available
+
+    def nextId(self):
         return PAGE_PROCESS
 
 
@@ -797,7 +1097,8 @@ class PipelineWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, mode, mesh_plan, mesh_user_files,
-                 cook_items=None, tex_items=None, combine_selected=None):
+                 cook_items=None, tex_items=None, combine_selected=None,
+                 cook_tex_items=None):
         super().__init__()
         self.mode = mode
         self.mesh_plan = mesh_plan
@@ -805,6 +1106,7 @@ class PipelineWorker(QThread):
         self.cook_items = cook_items or {}
         self.tex_items = tex_items or {}
         self.combine_selected = combine_selected or []
+        self.cook_tex_items = cook_tex_items or {}
 
     def run(self):
         try:
@@ -812,7 +1114,8 @@ class PipelineWorker(QThread):
                 items = [{"src": src, "target": tgt}
                          for tgt, src in self.cook_items.items()]
                 pak = cook.run_cook_pipeline_multi(
-                    items, progress=lambda m, p=None: self.status.emit(m))
+                    items, tex_items=self.cook_tex_items,
+                    progress=lambda m, p=None: self.status.emit(m))
             elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
@@ -856,7 +1159,8 @@ class ProcessPage(QWizardPage):
         self.worker = PipelineWorker(
             getattr(w, "mode", "regular"), getattr(w, "mesh_plan", None),
             getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}),
-            getattr(w, "tex_items", {}), getattr(w, "combine_selected", []))
+            getattr(w, "tex_items", {}), getattr(w, "combine_selected", []),
+            getattr(w, "cook_tex_items", {}))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)
@@ -924,7 +1228,7 @@ class FinishPage(QWizardPage):
 class ExtractListPage(QWizardPage):
     def __init__(self):
         super().__init__()
-        self.setTitle("Extract textures")
+        self.setTitle("Extract assets")
         self.setSubTitle("Pull originals out of the game to edit — pick one or many.")
         self._rows = []
         self._stretch_added = False
@@ -935,18 +1239,28 @@ class ExtractListPage(QWizardPage):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._container)
 
-        self.add_btn = QPushButton("➕  Add another texture…")
+        self.add_btn = QPushButton("➕  Add another asset…")
         self.add_btn.clicked.connect(self._add_another)
         self.fmt = QComboBox()
         self.fmt.addItem("PNG — easy to edit (recommended)", "png")
         self.fmt.addItem("DDS — exact format + mips (for re-injection)", "dds")
         self.fmt.setMaximumWidth(360)
 
+        self.folder_btn = QPushButton("Save to…")
+        self.folder_btn.clicked.connect(self._pick_folder)
+        self.folder_lbl = QLabel("")
+        self.folder_lbl.setStyleSheet(f"color:{MUTED};")
+        self.folder_lbl.setWordWrap(True)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.folder_btn)
+        folder_row.addWidget(self.folder_lbl, 1)
+
         lay = QVBoxLayout(self)
         lay.addWidget(scroll)
         lay.addWidget(self.add_btn)
-        lay.addWidget(QLabel("Export format:"))
+        lay.addWidget(QLabel("Texture export format  (meshes are handed back as .uasset):"))
         lay.addWidget(self.fmt)
+        lay.addLayout(folder_row)
 
     def selected_format(self) -> str:
         return self.fmt.currentData() or "png"
@@ -954,9 +1268,21 @@ class ExtractListPage(QWizardPage):
     def selected_assets(self):
         return [r["mount"] for r in self._rows if r["cb"].isChecked()]
 
+    def _pick_folder(self):
+        default = getattr(self.wizard(), "extract_dest", "") or \
+            str(Path(os.path.expanduser("~")) / "Documents")
+        d = QFileDialog.getExistingDirectory(
+            self, "Choose a folder to save the extracted assets", default)
+        if d:
+            self.wizard().extract_dest = d
+            self.folder_lbl.setText(d)
+            self.completeChanged.emit()
+
     def initializePage(self):
-        self.setFinalPage(True)
-        self.wizard().setButtonText(QWizard.FinishButton, "Save…")
+        wiz = self.wizard()
+        if not getattr(wiz, "extract_dest", ""):
+            wiz.extract_dest = str(Path(os.path.expanduser("~")) / "Documents")
+        self.folder_lbl.setText(wiz.extract_dest)
         while self._vbox.count():
             it = self._vbox.takeAt(0)
             w = it.widget()
@@ -970,7 +1296,7 @@ class ExtractListPage(QWizardPage):
             self._add_row(primary, removable=False)
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                rel = core.related_textures(primary)
+                rel = core.related_assets(primary)
             except Exception:
                 rel = []
             finally:
@@ -980,6 +1306,7 @@ class ExtractListPage(QWizardPage):
         self._vbox.addStretch(1)
         self._stretch_added = True
         self.completeChanged.emit()
+        self._start_previews()
 
     def _add_row(self, mount, removable):
         if any(r["mount"] == mount for r in self._rows):
@@ -987,14 +1314,16 @@ class ExtractListPage(QWizardPage):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
+        thumb = _thumb_label(48)
         cb = QCheckBox(_basename(mount))
         cb.setChecked(True)
         cb.toggled.connect(lambda *_: self.completeChanged.emit())
-        rec = {"mount": mount, "cb": cb}
+        rec = {"mount": mount, "cb": cb, "thumb": thumb}
+        h.addWidget(thumb)
         h.addWidget(cb, 1)
         if removable:
             rm = QPushButton("✕")
-            rm.setFixedWidth(28)
+            rm.setObjectName("rm")
             rm.clicked.connect(lambda _=False, row=row, rec=rec: self._remove(row, rec))
             h.addWidget(rm)
         if self._stretch_added:
@@ -1002,6 +1331,21 @@ class ExtractListPage(QWizardPage):
         else:
             self._vbox.addWidget(row)
         self._rows.append(rec)
+        if self._stretch_added:                   # live add → preview just this one
+            w = PreviewWorker([mount], self)
+            w.ready.connect(self._on_preview)
+            w.start()
+
+    def _start_previews(self):
+        w = PreviewWorker([r["mount"] for r in self._rows], self)
+        w.ready.connect(self._on_preview)
+        w.start()
+
+    def _on_preview(self, mount, png):
+        for r in self._rows:
+            if r["mount"] == mount:
+                _set_thumb(r["thumb"], png)
+                return
 
     def _remove(self, row, rec):
         if rec in self._rows:
@@ -1010,15 +1354,129 @@ class ExtractListPage(QWizardPage):
         self.completeChanged.emit()
 
     def _add_another(self):
-        items = core.load_assets()
+        items = sorted(set(core.load_meshes()) | set(core.load_assets()))
         mount, ok = QInputDialog.getItem(
-            self, "Add a texture", "Pick a texture to extract:", items, 0, True)
+            self, "Add an asset", "Pick a mesh or texture to extract:", items, 0, True)
         if ok and mount and mount.strip():
             self._add_row(mount.strip(), removable=True)
             self.completeChanged.emit()
 
     def isComplete(self):
-        return bool(self.selected_assets())
+        return bool(self.selected_assets()) and \
+            bool(getattr(self.wizard(), "extract_dest", ""))
+
+    def nextId(self):
+        return PAGE_EXTRACTPROG
+
+
+# ---------------------------------------------------------------------------
+# Extract progress + done pages — same treatment as the installer/cooker.
+# ---------------------------------------------------------------------------
+class ExtractSaveWorker(QThread):
+    status = Signal(str)
+    done = Signal(list)        # written file paths
+    failed = Signal(str)
+
+    def __init__(self, assets, dest, fmt):
+        super().__init__()
+        self.assets = assets
+        self.dest = dest
+        self.fmt = fmt
+
+    def run(self):
+        try:
+            written = core.export_assets(self.assets, self.dest, self.fmt,
+                                         progress=self.status.emit)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+        else:
+            self.done.emit(written)
+
+
+class ExtractProgressPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Saving your assets")
+        self.setSubTitle("Extracting — hang tight…")
+        self._done = False
+        self.worker = None
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)            # themed indeterminate bar
+        self.status = QLabel("Starting…")
+        lay = QVBoxLayout(self)
+        lay.addStretch(1)
+        lay.addWidget(self.status, alignment=Qt.AlignCenter)
+        lay.addWidget(self.bar)
+        lay.addStretch(1)
+
+    def initializePage(self):
+        self._done = False
+        self.completeChanged.emit()
+        wiz = self.wizard()
+        wiz.button(QWizard.BackButton).setEnabled(False)
+        page = wiz.page(PAGE_EXTRACTLIST)
+        self.worker = ExtractSaveWorker(page.selected_assets(),
+                                        getattr(wiz, "extract_dest", ""),
+                                        page.selected_format())
+        self.worker.status.connect(self.status.setText)
+        self.worker.done.connect(self._on_done)
+        self.worker.failed.connect(self._on_fail)
+        self.worker.start()
+
+    def _on_done(self, written):
+        wiz = self.wizard()
+        wiz.extract_written = written
+        wiz.button(QWizard.BackButton).setEnabled(True)
+        self._done = True
+        self.completeChanged.emit()
+        QTimer.singleShot(0, wiz.next)
+
+    def _on_fail(self, msg):
+        self.wizard().button(QWizard.BackButton).setEnabled(True)
+        self.status.setText("Failed.")
+        QMessageBox.critical(self, "Pak Rat", f"Extract failed:\n{msg}")
+
+    def isComplete(self):
+        return self._done
+
+    def nextId(self):
+        return PAGE_EXTRACTDONE
+
+
+class ExtractDonePage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Done")
+        self.setSubTitle("Your assets were extracted.")
+        self.msg = QLabel("")
+        self.msg.setWordWrap(True)
+        self.reveal_btn = QPushButton("Open the folder")
+        self.reveal_btn.clicked.connect(self._reveal)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.msg)
+        lay.addSpacing(8)
+        lay.addWidget(self.reveal_btn)
+        lay.addStretch(1)
+
+    def initializePage(self):
+        self.setFinalPage(True)
+        self.wizard().setButtonText(QWizard.FinishButton, "Close")
+        written = getattr(self.wizard(), "extract_written", [])
+        dest = getattr(self.wizard(), "extract_dest", "")
+        self.msg.setText(f"Extracted {len(written)} file(s) to:\n{dest}")
+        if written:
+            try:
+                core.reveal_in_explorer(written[0])
+            except Exception:
+                pass
+
+    def _reveal(self):
+        w = getattr(self.wizard(), "extract_written", [])
+        if w:
+            core.reveal_in_explorer(w[0])
+
+    def isComplete(self):
+        return True
 
     def isFinalPage(self):
         return True
@@ -1120,6 +1578,32 @@ class CombineSourcePage(QWizardPage):
 # ---------------------------------------------------------------------------
 # Combine mode — page 2: cherry-pick assets (conflict-aware)
 # ---------------------------------------------------------------------------
+class _HoverCheckBox(QCheckBox):
+    """A checkbox that emits when the pointer enters it (for hover previews)."""
+    hovered = Signal()
+
+    def enterEvent(self, e):
+        self.hovered.emit()
+        super().enterEvent(e)
+
+
+class PakPreviewWorker(QThread):
+    """Decodes one texture's preview from a specific pak (combine hover)."""
+    ready = Signal(str, str)   # mount, png path ("" = none)
+
+    def __init__(self, pak, mount, parent=None):
+        super().__init__(parent)
+        self._pak = pak
+        self._mount = mount
+
+    def run(self):
+        try:
+            p = core.decode_pak_preview(self._pak, self._mount) or ""
+        except Exception:
+            p = ""
+        self.ready.emit(self._mount, p)
+
+
 class CombineSelectPage(QWizardPage):
     _KIND_TAG = {"mesh": "MESH", "texture": "TEX", "material": "MAT",
                  "shader": "SHD", "other": "···"}
@@ -1128,8 +1612,11 @@ class CombineSelectPage(QWizardPage):
         super().__init__()
         self.setTitle("Pick the assets to include")
         self.setSubTitle("Tick what you want from each mod. ⚠ marks an asset more "
-                         "than one mod changes — you’ll pick the winner on Next.")
+                         "than one mod changes — you’ll pick the winner on Next. "
+                         "Hover a texture to preview it.")
         self._rows = []   # {asset: PakAsset, cb}
+        self._prev_cache = {}     # mount -> decoded png ("" = none)
+        self._prev_pending = set()
 
         self._container = QWidget()
         self._vbox = QVBoxLayout(self._container)
@@ -1179,10 +1666,13 @@ class CombineSelectPage(QWizardPage):
             for a in assets:
                 tag = self._KIND_TAG.get(a.kind, "···")
                 warn = "  ⚠" if overlap.get(a.mount, 0) > 1 else ""
-                cb = QCheckBox(f"    [{tag}]  {a.leaf}{warn}")
+                cb = _HoverCheckBox(f"    [{tag}]  {a.leaf}{warn}")
                 if warn:
                     cb.setStyleSheet("color:#c08a2e;")
                 cb.toggled.connect(lambda *_: self.completeChanged.emit())
+                cb.hovered.connect(lambda a=a: self._hover(a))
+                if not a.leaf.startswith("T_"):
+                    cb.setToolTip("(no preview)")
                 self._vbox.addWidget(cb)
                 self._rows.append({"asset": a, "cb": cb})
                 group_cbs.append(cb)
@@ -1190,6 +1680,28 @@ class CombineSelectPage(QWizardPage):
                 lambda on, cbs=group_cbs: [c.setChecked(on) for c in cbs])
         self._vbox.addStretch(1)
         self.completeChanged.emit()
+
+    def _hover(self, asset):
+        png = self._prev_cache.get(asset.mount)
+        if png is not None:
+            self._show_tip(png)
+            return
+        if not asset.leaf.startswith("T_") or asset.mount in self._prev_pending:
+            return
+        self._prev_pending.add(asset.mount)
+        w = PakPreviewWorker(asset.pak, asset.mount, self)
+        w.ready.connect(self._prev_ready)
+        w.start()
+
+    def _prev_ready(self, mount, png):
+        self._prev_pending.discard(mount)
+        self._prev_cache[mount] = png
+        self._show_tip(png)
+
+    def _show_tip(self, png):
+        if png and os.path.exists(png):
+            src = png.replace("\\", "/")   # HTML img needs forward slashes
+            QToolTip.showText(QCursor.pos(), f'<img src="{src}" width="160">')
 
     def _checked(self):
         return [r["asset"] for r in self._rows if r["cb"].isChecked()]
@@ -1241,6 +1753,9 @@ class PakRatWizard(QWizard):
         self.mesh_plan = None
         self.mesh_user_files = {}
         self.cook_items = {}
+        self.cook_tex_items = {}
+        self.extract_dest = ""
+        self.extract_written = []
         self.tex_items = {}
         self.combine_sources = []
         self.combine_selected = []
@@ -1262,10 +1777,28 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_FINISH, FinishPage())
         self.setPage(PAGE_SETUP, SetupPage())
         self.setPage(PAGE_COOKINPUT, CookListPage())
+        self.setPage(PAGE_COOKTEX, CookTexturePage())
         self.setPage(PAGE_EXTRACTLIST, ExtractListPage())
+        self.setPage(PAGE_EXTRACTPROG, ExtractProgressPage())
+        self.setPage(PAGE_EXTRACTDONE, ExtractDonePage())
         self.setPage(PAGE_COMBINESRC, CombineSourcePage())
         self.setPage(PAGE_COMBINESEL, CombineSelectPage())
         self.setStartId(PAGE_MODE)
+
+        # On the final "Done" page, Back should start the whole flow over at
+        # page 1 (not re-run the pipeline). Mid-flow Back stays normal.
+        back = self.button(QWizard.BackButton)
+        try:
+            back.clicked.disconnect()      # drop QWizard's built-in back()
+        except (RuntimeError, TypeError):
+            pass
+        back.clicked.connect(self._on_back)
+
+    def _on_back(self):
+        if self.currentId() in (PAGE_FINISH, PAGE_EXTRACTDONE):
+            self.restart()      # done page → start completely over at page 1
+        else:
+            self.back()         # normal step-back everywhere else
 
     def _ask_pak_name(self) -> str | None:
         """Prompt for the mod's file name. None if the user cancels."""
@@ -1284,39 +1817,10 @@ class PakRatWizard(QWizard):
             text=suggestion)
         return name if ok else None
 
-    def _accept_extract(self):
-        """Extract mode final action: decode the selected originals to a chosen
-        folder, reveal them, then close."""
-        page = self.page(PAGE_EXTRACTLIST)
-        assets = page.selected_assets()
-        if not assets:
-            return
-        fmt = page.selected_format()
-        default = str(Path(os.path.expanduser("~")) / "Documents")
-        dest = QFileDialog.getExistingDirectory(
-            self, "Choose a folder to save the extracted textures", default)
-        if not dest:
-            return  # cancelled — keep the wizard open
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            written = core.export_many(assets, dest, fmt)
-        except Exception as e:  # surface; keep open so the user can retry
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Pak Rat", f"Extract failed:\n{e}")
-            return
-        QApplication.restoreOverrideCursor()
-        if not written:
-            QMessageBox.warning(self, "Pak Rat", "Nothing was extracted.")
-            return
-        core.reveal_in_explorer(written[0])
-        QMessageBox.information(
-            self, "Pak Rat", f"Extracted {len(written)} texture(s) to:\n{dest}")
-        super().accept()
-
     def accept(self):
         """Final action: name the pak, then Deploy or Finish, then close."""
         if getattr(self, "mode", "regular") == "extract":
-            self._accept_extract()
+            super().accept()   # extract already saved on the progress page
             return
         page = self.page(PAGE_FINISH)
         name = self._ask_pak_name()
@@ -1351,6 +1855,7 @@ def main():
             pass
     app = QApplication([a for a in sys.argv if a != "--selftest"])
     app.setFont(QFont("Segoe UI", 10))
+    apply_theme(app)  # synthwave dark theme from the icon palette
     app.setWindowIcon(QIcon(resource_path("Pak-Rat.ico")))
 
     # Splash while the wizard constructs (Pak-Rat.png scaled ~400px).

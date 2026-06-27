@@ -138,6 +138,17 @@ distribution. See `core.ensure_oodle()`.
 
 ## Changelog
 
+### 2.0.1
+- **New synthwave look** themed from the app icon (neon cyan/magenta on dark).
+- **Texture previews are back** — Regular Texture and Extract show a thumbnail of
+  each original (and your chosen replacement), in a scrollable list.
+- **Cook Mesh now offers textures** — after picking your model, optionally swap
+  the textures it uses; they pack into the same `.pak`.
+- **Combine** shows a texture preview on hover.
+- **Extract** saves through a progress page, then a done page.
+- Dropdowns show just the asset name; remove (✕) buttons are visible again;
+  Back on a "done" page restarts at the beginning.
+
 ### 2.0.0
 - **Cook Mesh from a 3D file** — bring an FBX/OBJ/glTF/GLB/STL/PLY/DAE/.blend and
   Pak Rat converts it with a bundled portable Blender and cooks it with your
