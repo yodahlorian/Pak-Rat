@@ -58,6 +58,8 @@ def _find(*relparts: str, roots=None) -> Path:
 
 def _data_dir() -> Path:
     # data/ stays EXTERNAL (refreshable without a rebuild): prefer next to exe.
+    # The clean lists are not shipped — they're generated on first use from the
+    # installed game (see _ensure_clean_lists) and cached here.
     for r in (_app_dir(), _app_dir() / "Pak-Rat", Path(__file__).resolve().parent):
         if (r / "data").is_dir():
             return r / "data"
@@ -79,26 +81,65 @@ VALID_MESH_EXTS = {".uasset", ".fbx"}  # placeholder — confirm at step 4
 # ---------------------------------------------------------------------------
 # Game install discovery (base pak + ~mods)
 # ---------------------------------------------------------------------------
+def _steam_library_roots() -> list[Path]:
+    """Every Steam library root on this PC, authoritatively.
+
+    Reads Steam's own libraryfolders.vdf (so libraries with ANY folder name, on
+    any drive, are found — not just ones literally called SteamLibrary), seeded
+    from the registry's SteamPath and the standard install dirs.
+    """
+    steam_dirs: list[Path] = []
+    try:
+        import winreg
+        for hk, key, val in (
+            (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        ):
+            try:
+                with winreg.OpenKey(hk, key) as k:
+                    steam_dirs.append(Path(winreg.QueryValueEx(k, val)[0]))
+            except OSError:
+                pass
+    except Exception:
+        pass
+    steam_dirs += [Path(r"C:\Program Files (x86)\Steam"), Path(r"C:\Program Files\Steam")]
+
+    roots: list[Path] = []
+    seen = set()
+    for sd in steam_dirs:
+        if sd not in seen and sd.is_dir():
+            seen.add(sd); roots.append(sd)            # the Steam dir is itself a library
+        vdf = sd / "steamapps" / "libraryfolders.vdf"
+        if vdf.is_file():
+            try:
+                txt = vdf.read_text(encoding="utf-8", errors="ignore")
+                for m in re.findall(r'"path"\s*"([^"]+)"', txt):
+                    p = Path(m.replace("\\\\", "\\"))
+                    if p not in seen:
+                        seen.add(p); roots.append(p)
+            except Exception:
+                pass
+    return roots
+
+
 def _rr_paks_dir() -> Path:
     """Locate the official Steam install's Paks folder.
 
-    Steam can live on any drive (default under Program Files, or a SteamLibrary
-    on another drive), so we probe the common roots. We deliberately do NOT look
-    anywhere else — no Documents/dev folders — so the app only ever reads a
-    legitimately installed copy of the game.
+    We only ever read a legitimately installed copy of the game: Steam libraries
+    (via libraryfolders.vdf) first, then a few common drive-letter guesses as a
+    fallback. No Documents/dev folders.
     """
     rel = r"steamapps\common\RetroRewind\RetroRewind\Content\Paks"
-    roots = [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"]
-    for drive in "CDEFGH":
-        roots.append(rf"{drive}:\SteamLibrary")
-        roots.append(rf"{drive}:\Steam")
-    for r in roots:
-        p = Path(r) / rel
+    candidates = [r / rel for r in _steam_library_roots()]
+    for drive in "CDEFGH":                              # fallback guesses
+        candidates.append(Path(rf"{drive}:\SteamLibrary") / rel)
+        candidates.append(Path(rf"{drive}:\Steam") / rel)
+    for p in candidates:
         if (p / "RetroRewind-Windows.pak").is_file():
             return p
     raise RuntimeError(
         "Retro Rewind (Steam) install not found. Looked for "
-        "RetroRewind-Windows.pak under the standard Steam library locations.")
+        "RetroRewind-Windows.pak across all Steam libraries.")
 
 
 def base_pak() -> Path:
@@ -189,27 +230,65 @@ def ensure_oodle() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Asset inventory (consumes Tron's data/textures_clean.txt)
+# Asset inventory — the texture/mesh dropdown lists.
+#
+# These are NOT shipped. They're derived from the player's own installed game
+# (one repak scan of the base pak, filtered + classified) on first use, then
+# cached in the data dir. Keeps the lists correct per game version, and means
+# there's nothing to bundle or let drift out of date.
 # ---------------------------------------------------------------------------
-def load_assets() -> list[str]:
-    """Texture dropdown source: the pre-filtered, parse-verified _bc list."""
-    tc = TEXTURES_CLEAN()
-    if tc.exists():
-        return [ln.strip() for ln in tc.read_text(encoding="utf-8").splitlines()
-                if ln.strip()]
-    return ["(placeholder) textures_clean.txt not found — run the asset scan first"]
-
-
 MESHES_CLEAN = lambda: _data_dir() / "meshes_clean.txt"            # noqa: E731
+
+_NO_GAME = ("(placeholder) couldn't read the game's assets — is Retro Rewind "
+            "installed?")
+
+
+def _generate_clean_lists() -> None:
+    """Scan the installed base pak and (re)write textures_clean.txt + meshes_clean.txt.
+    Texture rule (per Yodah): a swappable texture is T_<name>_bc — the base colour.
+    Any other T_ asset is an NPC/other map we deliberately leave alone.
+    Mesh rule: LA_/SM_ static meshes (SK_/SKM_ skeletal are excluded)."""
+    tex, mesh = [], []
+    for e in _pak_entries():
+        if not e.endswith(".uasset"):
+            continue
+        m = e[:-7]
+        leaf = m.rsplit("/", 1)[-1]
+        if leaf.startswith("T_") and leaf.endswith("_bc"):
+            tex.append(m)
+        elif leaf.startswith(("LA_", "SM_")):
+            mesh.append(m)
+    d = _data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    TEXTURES_CLEAN().write_text("\n".join(sorted(set(tex))) + "\n", encoding="utf-8")
+    MESHES_CLEAN().write_text("\n".join(sorted(set(mesh))) + "\n", encoding="utf-8")
+
+
+def _ensure_clean_lists() -> bool:
+    """Make sure both dropdown lists exist, generating them from the installed
+    game if not. False if the game can't be read (not installed / repak fail)."""
+    if TEXTURES_CLEAN().exists() and MESHES_CLEAN().exists():
+        return True
+    try:
+        _generate_clean_lists()
+    except Exception:
+        return False
+    return TEXTURES_CLEAN().exists() and MESHES_CLEAN().exists()
+
+
+def _read_list(p: Path) -> list[str]:
+    return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()
+            if ln.strip()]
+
+
+def load_assets() -> list[str]:
+    """Texture dropdown source: the _bc base-colour list (generated on demand)."""
+    return _read_list(TEXTURES_CLEAN()) if _ensure_clean_lists() else [_NO_GAME]
 
 
 def load_meshes() -> list[str]:
-    """Mesh dropdown source: pre-filtered LA_/SM_ static meshes."""
-    mc = MESHES_CLEAN()
-    if mc.exists():
-        return [ln.strip() for ln in mc.read_text(encoding="utf-8").splitlines()
-                if ln.strip()]
-    return load_assets()
+    """Mesh dropdown source: LA_/SM_ static meshes (generated on demand)."""
+    return _read_list(MESHES_CLEAN()) if _ensure_clean_lists() else [_NO_GAME]
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,11 @@ oo2core_*.dll
 
 # ── Bulky generated data we don't ship in source ────────────────────────
 Pak-Rat/data/assets.txt
+Pak-Rat/data/textures_clean.txt
+Pak-Rat/data/meshes_clean.txt
+
+# ── Build log ───────────────────────────────────────────────────────────
+_build.log
 
 # ── Internal docs & stray branding — kept local, out of the public package ─
 /V2_BACKLOG.md
