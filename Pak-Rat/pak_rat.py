@@ -27,10 +27,11 @@ from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPalette,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QFileDialog,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QProgressBar,
-    QPushButton, QRadioButton, QScrollArea, QSplashScreen, QToolTip, QVBoxLayout,
-    QWidget, QWizard, QWizardPage,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QDialog,
+    QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea,
+    QSplashScreen, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QWizard, QWizardPage,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,7 +44,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -129,6 +130,165 @@ def resource_path(name: str) -> str:
 def _basename(asset: str) -> str:
     """Leaf name of an asset path, e.g. .../textures/MI_Detail_01 -> MI_Detail_01."""
     return asset.rstrip("/").split("/")[-1]
+
+
+# ---------------------------------------------------------------------------
+# Category grouping for asset pickers — split by type (Meshes / Textures), then
+# by family (the first token of the name, e.g. BackAlley, Candy).
+# ---------------------------------------------------------------------------
+def _is_tex(mount: str) -> bool:
+    return _basename(mount).startswith("T_")
+
+
+def _is_mesh_asset(mount: str) -> bool:
+    return _basename(mount).startswith(("LA_", "SM_", "SK_", "SKM_"))
+
+
+def _family(mount: str) -> str:
+    leaf = _basename(mount)
+    for pre in ("SKM_", "SK_", "SM_", "LA_", "T_"):
+        if leaf.startswith(pre):
+            leaf = leaf[len(pre):]
+            break
+    out = []
+    for ch in leaf:
+        if ch.isalnum():
+            out.append(ch)
+        else:
+            break
+    return "".join(out) or "Other"
+
+
+def _grouped_order(mounts):
+    """Ordered [(level, text, mount)]: level 0 = type header, 1 = family header,
+    2 = selectable item (mount set). Type headers only appear when both kinds
+    are present."""
+    tex = sorted(m for m in mounts if _is_tex(m))
+    mesh = sorted(m for m in mounts if _is_mesh_asset(m))
+    rest = sorted(set(mounts) - set(tex) - set(mesh))
+    both = bool(tex) and bool(mesh)
+    out = []
+
+    def emit(items):
+        fams = {}
+        for m in items:
+            fams.setdefault(_family(m), []).append(m)
+        for fam in sorted(fams):
+            out.append((1, fam, None))
+            for m in fams[fam]:
+                out.append((2, _basename(m), m))
+
+    if mesh:
+        if both:
+            out.append((0, "Meshes", None))
+        emit(mesh)
+    if tex:
+        if both:
+            out.append((0, "Textures", None))
+        emit(tex)
+    if rest:
+        out.append((0, "Other", None))
+        emit(rest)
+    return out
+
+
+def populate_grouped_combo(combo, mounts):
+    """Fill an editable combo with grouped, disabled headers + selectable items
+    (leaf shown, full mount in data). Returns (labels, mount_by_label)."""
+    combo.clear()
+    labels, mbl = [], {}
+    model = combo.model()
+    for level, text, mount in _grouped_order(mounts):
+        if mount is None:
+            disp = f"── {text} ──" if level == 0 else f"  {text}"
+            combo.addItem(disp)
+            it = model.item(combo.count() - 1)
+            it.setEnabled(False)
+            if level == 0:
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+        else:
+            label = text                       # leaf name
+            if label in mbl:                   # disambiguate duplicate leaves
+                parent = mount.rstrip("/").split("/")[-2] if "/" in mount else ""
+                label = f"{text}  ·{parent}"
+                n = 2
+                while label in mbl:
+                    label = f"{text}  ·{parent}{n}"
+                    n += 1
+            combo.addItem("      " + label, mount)
+            mbl[label] = mount
+            labels.append(label)
+    return labels, mbl
+
+
+class GroupedPickerDialog(QDialog):
+    """Searchable, category-grouped asset picker (Meshes/Textures → family)."""
+    def __init__(self, mounts, title, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(460, 460)
+        self.selected = None
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search…")
+        self.search.textChanged.connect(self._filter)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.itemDoubleClicked.connect(self._dbl)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.search)
+        lay.addWidget(self.tree)
+        lay.addWidget(bb)
+        cur_type = cur_fam = None
+        for level, text, mount in _grouped_order(mounts):
+            if level == 0:
+                cur_type = QTreeWidgetItem(self.tree, [text])
+                cur_type.setExpanded(True)
+                cur_fam = None
+            elif level == 1:
+                cur_fam = QTreeWidgetItem(cur_type or self.tree, [text])
+            else:
+                leaf = QTreeWidgetItem(cur_fam or cur_type or self.tree, [text])
+                leaf.setData(0, Qt.UserRole, mount)
+
+    def _filter(self, q):
+        q = q.strip().lower()
+
+        def visit(item):
+            if item.data(0, Qt.UserRole) is not None:    # leaf
+                vis = q in item.text(0).lower()
+                item.setHidden(not vis)
+                return vis
+            any_vis = False
+            for i in range(item.childCount()):
+                if visit(item.child(i)):
+                    any_vis = True
+            item.setHidden(not any_vis)
+            if any_vis and q:
+                item.setExpanded(True)
+            return any_vis
+        for i in range(self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(i))
+
+    def _dbl(self, item, _col):
+        if item.data(0, Qt.UserRole) is not None:
+            self.selected = item.data(0, Qt.UserRole)
+            self.accept()
+
+    def _accept(self):
+        it = self.tree.currentItem()
+        if it and it.data(0, Qt.UserRole) is not None:
+            self.selected = it.data(0, Qt.UserRole)
+            self.accept()
+
+    @staticmethod
+    def pick(parent, mounts, title):
+        d = GroupedPickerDialog(mounts, title, parent)
+        return d.selected if d.exec() == QDialog.Accepted else None
 
 
 HOVER_PX = 512   # size of the large on-hover preview (screen-safe; <1080p tall)
@@ -385,19 +545,9 @@ class AssetPage(QWizardPage):
             items = sorted(set(core.load_meshes()) | set(core.load_assets()))
         else:
             items = core.load_meshes() if mesh_like else core.load_assets()
-        # Show just the leaf name everywhere except mesh mode (left as-is).
-        leaf_display = (mode != "mesh")
         self._resolved_for = None
-        self._mesh_set = set(items) if mode == "mesh" else set()
-        self._mount_by_label = {}
         self.combo.blockSignals(True)
-        self.combo.clear()
-        labels = []
-        for mount in items:
-            label = _basename(mount) if leaf_display else mount
-            self.combo.addItem(label, mount)
-            self._mount_by_label[label] = mount
-            labels.append(label)
+        labels, self._mount_by_label = populate_grouped_combo(self.combo, items)
         self.combo.setCurrentIndex(-1)
         self.combo.setEditText("")
         self.combo.blockSignals(False)
@@ -429,13 +579,13 @@ class AssetPage(QWizardPage):
     def _on_primary_changed(self, text):
         if not self._is_mesh():
             return
-        text = text.strip()
-        if text == self._resolved_for or text not in self._mesh_set:
+        mount = self._mount_by_label.get(text.strip())
+        if not mount or mount == self._resolved_for:
             return
-        self._resolved_for = text
+        self._resolved_for = mount
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            texs = core.resolve_overlay_textures(text)
+            texs = core.resolve_overlay_textures(mount)
         except Exception:
             texs = []
         finally:
@@ -676,9 +826,8 @@ class TextureListPage(QWizardPage):
 
     def _add_another(self):
         items = core.load_assets()
-        mount, ok = QInputDialog.getItem(
-            self, "Add a texture", "Pick a texture to replace:", items, 0, True)
-        if ok and mount and mount.strip():
+        mount = GroupedPickerDialog.pick(self, items, "Add a texture")
+        if mount:
             self._add_row(mount.strip(), removable=True)
             self.completeChanged.emit()
 
@@ -998,10 +1147,8 @@ class CookListPage(QWizardPage):
 
     def _add_another(self):
         items = core.load_meshes()
-        mount, ok = QInputDialog.getItem(
-            self, "Add a mesh", "Pick a game mesh to also replace:",
-            items, 0, True)
-        if ok and mount and mount.strip():
+        mount = GroupedPickerDialog.pick(self, items, "Add a mesh")
+        if mount:
             self._add_row(mount.strip(), "added")
             self.completeChanged.emit()
 
@@ -1402,9 +1549,8 @@ class ExtractListPage(QWizardPage):
 
     def _add_another(self):
         items = sorted(set(core.load_meshes()) | set(core.load_assets()))
-        mount, ok = QInputDialog.getItem(
-            self, "Add an asset", "Pick a mesh or texture to extract:", items, 0, True)
-        if ok and mount and mount.strip():
+        mount = GroupedPickerDialog.pick(self, items, "Add an asset")
+        if mount:
             self._add_row(mount.strip(), removable=True)
             self.completeChanged.emit()
 

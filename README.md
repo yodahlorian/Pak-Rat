@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.2**
+**Version 2.0.3**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -31,8 +31,10 @@ Double-click **`Pak-Rat.exe`**.
 > First launch may show a Windows SmartScreen prompt ("Windows protected your
 > PC") because the app isn't code-signed. Click **More info → Run anyway**.
 
-> ⚠️ Keep `Pak-Rat.exe`, the `_internal` folder, and `data` folder **together**.
-> Move the whole Pak-Rat folder as a unit. Deleting `_internal` breaks the app.
+> ⚠️ Keep `Pak-Rat.exe` and the `_internal` folder **together** — move the whole
+> Pak-Rat folder as a unit. Deleting `_internal` breaks the app. (A small `data`
+> folder is created next to the exe on first run to cache the asset lists; it's
+> rebuilt automatically if removed.)
 
 ---
 
@@ -81,8 +83,10 @@ Bring your own model in almost any format — Pak Rat cooks it for you.
 Pull an original asset out of the game to use as a starting point — textures
 (decoded to PNG/DDS) or meshes (handed back as their cooked `.uasset`).
 
-1. Pick a texture or mesh from the dropdown (type to filter). Related sibling
-   assets are auto-added — untick any you don't want.
+1. Pick a texture or mesh from the dropdown — grouped by type (Meshes/Textures)
+   and family, or just type to filter. Use **Add another…** for a searchable,
+   grouped picker. Related sibling assets are auto-added — untick any you don't
+   want.
 2. Pak Rat shows a preview thumbnail of each texture (hover to enlarge).
 3. Choose the texture export format:
    - **PNG** — decoded, easy to edit in any image editor (recommended).
@@ -142,6 +146,14 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.3
+- Asset pickers are now **grouped by category** — Meshes / Textures, then by
+  family (BackAlley, Candy, …) — with type-to-filter still spanning everything.
+- The **Add another…** picker is now searchable and grouped (a tree), instead of
+  a flat list — much easier in the mixed mesh+texture extractor.
+- Fixed: duplicate leaf names (localised copies) could resolve to the wrong
+  folder's asset in a dropdown; picks now map to the exact asset.
 
 ### 2.0.2
 - Bigger **hover previews** (512px) across the texture swapper, cooker, extractor
