@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.3**
+**Version 2.0.4**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -146,6 +146,11 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.4
+- **Fixed first-run Cook setup failing** with `urlopen error unknown url type:
+  https` — the build was missing its SSL libraries, so it couldn't download the
+  portable Blender. They're now included.
 
 ### 2.0.3
 - Asset pickers are now **grouped by category** — Meshes / Textures, then by
