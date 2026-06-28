@@ -44,7 +44,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
 
-APP_VERSION = "2.0.8"
+APP_VERSION = "2.0.9"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -1162,43 +1162,43 @@ class CookListPage(QWizardPage):
 # ---------------------------------------------------------------------------
 # Embedded-texture extraction worker (cook mode) — runs Blender headless to pull
 # any textures baked into the user's model file(s). Slow (Blender spin-up), so
-# off the UI thread. Emits the combined list of extracted PNG paths.
+# off the UI thread. Emits {target_mount: [png, …]} so each cooked asset's
+# embedded textures stay associated with that asset (multiple meshes per pak).
 # ---------------------------------------------------------------------------
 class EmbedTexWorker(QThread):
-    done = Signal(object)      # list[str] of PNG paths
+    done = Signal(object)      # dict {target_mount: list[str] PNG paths}
 
-    def __init__(self, model_paths, parent=None):
+    def __init__(self, items, parent=None):
         super().__init__(parent)
-        self.model_paths = model_paths
+        self.items = dict(items)            # {target_mount: model_path}
 
     def run(self):
         env = cook.cook_env()
-        out, seen = [], set()
-        for src in self.model_paths:
+        out = {}
+        for target, src in self.items.items():
             try:
-                for png in cook.extract_embedded_textures(src, env):
-                    if png not in seen:
-                        seen.add(png)
-                        out.append(png)
+                out[target] = cook.extract_embedded_textures(src, env)
             except Exception:
-                pass
+                out[target] = []
         self.done.emit(out)
 
 
 # ---------------------------------------------------------------------------
-# Cook texture page (cook mode) — OPTIONAL textures for the freshly cooked mesh.
-# Seeded from the base-colour textures the target mesh(es) use. Skippable.
-# Textures baked into the user's model are extracted and offered per-slot via a
-# "Use embedded" menu (the user assigns each to a real game texture slot).
+# Cook texture page (cook mode) — OPTIONAL textures for the freshly cooked
+# mesh(es). One pak can cook several meshes, so the page is grouped per asset:
+# each asset lists ALL the textures it uses (base colour AND normal/_ram/…), and
+# each asset's own embedded textures are offered on its slots via "Use embedded".
+# Skippable. cook_tex_items maps texture mount -> chosen image (deduped by mount).
 # ---------------------------------------------------------------------------
 class CookTexturePage(QWizardPage):
     def __init__(self):
         super().__init__()
-        self.setTitle("Textures for your mesh  (optional)")
+        self.setTitle("Textures for your mesh(es)  (optional)")
         self.setSubTitle("A new mesh usually wants new textures — swap any of "
                          "these, or just hit Next to skip.")
-        self._rows = []
-        self._embedded = []        # list[str] PNG paths from the model
+        self._rows = []            # flat list of all slot recs (for previews)
+        self._blocks = []          # [{target, tray_layout, tray_w, recs}]
+        self._embedded = {}        # {target: [png, …]}
         self._embed_worker = None
 
         self._container = QWidget()
@@ -1207,11 +1207,6 @@ class CookTexturePage(QWizardPage):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._container)
 
-        # tray showing textures found embedded in the user's model
-        self.embed_tray = QWidget()
-        self._tray_h = QHBoxLayout(self.embed_tray)
-        self._tray_h.setContentsMargins(0, 0, 0, 0)
-        self.embed_tray.setVisible(False)
         self.embed_hint = QLabel("")
         self.embed_hint.setStyleSheet(f"color:{CYAN}; font-size:11px;")
         self.embed_hint.setWordWrap(True)
@@ -1224,7 +1219,6 @@ class CookTexturePage(QWizardPage):
         lay = QVBoxLayout(self)
         lay.addWidget(scroll)
         lay.addWidget(self.embed_hint)
-        lay.addWidget(self.embed_tray)
         lay.addWidget(self.hint)
 
     def initializePage(self):
@@ -1234,94 +1228,67 @@ class CookTexturePage(QWizardPage):
             if w:
                 w.deleteLater()
         self._rows = []
-        self._embedded = []
-        self._clear_tray()
-        self.embed_tray.setVisible(False)
+        self._blocks = []
+        self._embedded = {}
         self.embed_hint.setVisible(False)
         wiz = self.wizard()
         wiz.cook_tex_items = {}
-        targets = list(getattr(wiz, "cook_items", {}).keys())
+        items = dict(getattr(wiz, "cook_items", {}))      # {target: model_path}
+
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        seen, mounts = set(), []
+        any_tex = False
         try:
-            for tgt in targets:
+            for tgt in items:
                 try:
-                    for t in core.resolve_overlay_textures(tgt):
-                        if t not in seen:
-                            seen.add(t)
-                            mounts.append(t)
+                    mounts = core.resolve_all_textures(tgt)
                 except Exception:
-                    pass
+                    mounts = []
+                if mounts:
+                    any_tex = True
+                self._add_block(tgt, mounts)
         finally:
             QApplication.restoreOverrideCursor()
-        if mounts:
-            self.hint.setText("These are the textures your target mesh uses. "
-                              "Pick replacements for any you want changed.")
-            for m in mounts:
-                self._add_row(m)
+
+        if any_tex:
+            self.hint.setText("These are the textures your mesh(es) use. Pick "
+                              "replacements for any you want changed — or assign "
+                              "ones embedded in your model.")
         else:
-            self.hint.setText("No textures auto-detected for this mesh — you can "
-                              "skip and texture it later via Regular Texture.")
+            self.hint.setText("No textures auto-detected — you can skip and "
+                              "texture it later via Regular Texture.")
         self._vbox.addStretch(1)
         self.completeChanged.emit()
         self._start_previews()
-        self._start_embed_scan(list(getattr(wiz, "cook_items", {}).values()))
+        self._start_embed_scan(items)
 
-    # --- embedded-texture scan ---------------------------------------------
-    def _start_embed_scan(self, model_paths):
-        if not model_paths or not cook.is_ready():
-            return
-        self.embed_hint.setVisible(True)
-        self.embed_hint.setText("Scanning your model for embedded textures…")
-        self._embed_worker = EmbedTexWorker(model_paths, self)
-        self._embed_worker.done.connect(self._on_embedded)
-        self._embed_worker.start()
+    # --- per-asset block ----------------------------------------------------
+    def _add_block(self, target, mounts):
+        header = QLabel("◆  " + _basename(target))
+        header.setStyleSheet(f"color:{MAGENTA}; font-weight:700; margin-top:6px;")
+        self._vbox.addWidget(header)
 
-    def _on_embedded(self, paths):
-        self._embedded = paths or []
-        if not self._embedded:
-            self.embed_hint.setText("No textures were embedded in your model.")
-            return
-        self.embed_hint.setText(
-            "Found %d texture(s) embedded in your model. Use “Use embedded” on "
-            "any slot to assign one." % len(self._embedded))
-        self._build_tray()
-        self.embed_tray.setVisible(True)
-        # light up the per-slot embedded buttons now that we have candidates
-        for rec in self._rows:
-            rec["embed_btn"].setVisible(True)
+        # tray (filled once this asset's embedded textures arrive)
+        tray_w = QWidget()
+        tray_h = QHBoxLayout(tray_w)
+        tray_h.setContentsMargins(12, 0, 0, 0)
+        tray_w.setVisible(False)
+        self._vbox.addWidget(tray_w)
 
-    def _clear_tray(self):
-        while self._tray_h.count():
-            it = self._tray_h.takeAt(0)
-            w = it.widget()
-            if w:
-                w.deleteLater()
+        block = {"target": target, "tray_w": tray_w, "tray_layout": tray_h,
+                 "recs": []}
+        if mounts:
+            for m in mounts:
+                self._add_row(block, m)
+        else:
+            note = QLabel("    (no swappable textures found for this mesh)")
+            note.setStyleSheet(f"color:{MUTED};")
+            self._vbox.addWidget(note)
+        self._blocks.append(block)
 
-    def _build_tray(self):
-        self._clear_tray()
-        lbl = QLabel("Embedded:")
-        lbl.setStyleSheet(f"color:{MUTED};")
-        self._tray_h.addWidget(lbl)
-        for png in self._embedded:
-            cell = QWidget()
-            v = QVBoxLayout(cell)
-            v.setContentsMargins(0, 0, 0, 0)
-            v.setSpacing(1)
-            t = Thumb(size=48, spin=False)
-            t.set_image(png)
-            cap = QLabel(Path(png).stem.split("_", 1)[-1][:14])
-            cap.setAlignment(Qt.AlignCenter)
-            cap.setStyleSheet(f"color:{MUTED}; font-size:8px;")
-            v.addWidget(t, alignment=Qt.AlignCenter)
-            v.addWidget(cap)
-            self._tray_h.addWidget(cell)
-        self._tray_h.addStretch(1)
-
-    def _add_row(self, mount):
+    def _add_row(self, block, mount):
         row = QWidget()
         h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
+        h.setContentsMargins(12, 0, 0, 0)
         thumb = Thumb(spin=True)
         name = QLabel(_basename(mount))
         name.setMinimumWidth(150)
@@ -1337,8 +1304,8 @@ class CookTexturePage(QWizardPage):
         embed_btn.setVisible(False)        # shown once embedded textures arrive
         btn = QPushButton("Choose…")
         your = Thumb(spin=False)
-        rec = {"mount": mount, "status": status, "thumb": thumb, "your": your,
-               "embed_btn": embed_btn}
+        rec = {"mount": mount, "target": block["target"], "status": status,
+               "thumb": thumb, "your": your, "embed_btn": embed_btn}
         btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
         embed_btn.clicked.connect(lambda _=False, rec=rec: self._pick_embedded(rec))
         h.addWidget(_preview_cell(thumb))
@@ -1347,26 +1314,76 @@ class CookTexturePage(QWizardPage):
         h.addWidget(btn)
         h.addWidget(_preview_cell(your))
         self._vbox.addWidget(row)
+        block["recs"].append(rec)
         self._rows.append(rec)
 
+    # --- embedded-texture scan ---------------------------------------------
+    def _start_embed_scan(self, items):
+        if not items or not cook.is_ready():
+            return
+        self.embed_hint.setVisible(True)
+        self.embed_hint.setText("Scanning your model(s) for embedded textures…")
+        self._embed_worker = EmbedTexWorker(items, self)
+        self._embed_worker.done.connect(self._on_embedded)
+        self._embed_worker.start()
+
+    def _on_embedded(self, by_target):
+        self._embedded = by_target or {}
+        total = sum(len(v) for v in self._embedded.values())
+        if not total:
+            self.embed_hint.setText("No textures were embedded in your model(s).")
+            return
+        self.embed_hint.setText(
+            "Found %d embedded texture(s). Use “Use embedded” on any slot to "
+            "assign one — each mesh's textures are listed under it." % total)
+        for block in self._blocks:
+            pngs = self._embedded.get(block["target"], [])
+            if pngs:
+                self._build_tray(block, pngs)
+                for rec in block["recs"]:
+                    rec["embed_btn"].setVisible(True)
+
+    def _build_tray(self, block, pngs):
+        lay = block["tray_layout"]
+        lbl = QLabel("Embedded:")
+        lbl.setStyleSheet(f"color:{MUTED};")
+        lay.addWidget(lbl)
+        for png in pngs:
+            cell = QWidget()
+            v = QVBoxLayout(cell)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(1)
+            t = Thumb(size=48, spin=False)
+            t.set_image(png)
+            cap = QLabel(Path(png).stem.split("_", 1)[-1][:14])
+            cap.setAlignment(Qt.AlignCenter)
+            cap.setStyleSheet(f"color:{MUTED}; font-size:8px;")
+            v.addWidget(t, alignment=Qt.AlignCenter)
+            v.addWidget(cap)
+            lay.addWidget(cell)
+        lay.addStretch(1)
+        block["tray_w"].setVisible(True)
+
     def _start_previews(self):
-        w = PreviewWorker([r["mount"] for r in self._rows], self)
+        mounts = sorted({r["mount"] for r in self._rows})
+        w = PreviewWorker(mounts, self)
         w.ready.connect(self._on_preview)
         w.start()
 
     def _on_preview(self, mount, png):
+        # a texture shared across meshes shows in more than one row — update all
         for r in self._rows:
             if r["mount"] == mount:
                 r["thumb"].set_image(png)
-                return
 
     def _pick_embedded(self, rec):
-        """Menu of textures embedded in the model; selecting one assigns it to
-        this slot (same path as a browsed file → rides tex_items)."""
-        if not self._embedded:
+        """Menu of textures embedded in THIS asset's model; selecting one assigns
+        it to this slot (same path as a browsed file → rides tex_items)."""
+        pngs = self._embedded.get(rec["target"], [])
+        if not pngs:
             return
         menu = QMenu(self)
-        for png in self._embedded:
+        for png in pngs:
             label = Path(png).stem.split("_", 1)[-1] or Path(png).name
             act = menu.addAction(label)
             act.triggered.connect(lambda _=False, p=png, rec=rec:

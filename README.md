@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.8**
+**Version 2.0.9**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -71,11 +71,13 @@ Bring your own model in almost any format — Pak Rat cooks it for you.
 2. Pick the game mesh your model stands in for.
 3. Choose your model file (**FBX, OBJ, glTF/GLB, STL, PLY, DAE or .blend**); add
    more meshes to pack together if you want.
-4. Optionally swap the textures the mesh uses — a fresh mesh usually wants fresh
-   textures. This step is offered next and is skippable. **If your model has its
-   own textures baked in** (common with GLB and packed FBX), Pak Rat pulls them
-   out and shows them in an **Embedded** tray; click **Use embedded** on any
-   texture slot to drop one straight in — no need to export them by hand first.
+4. Optionally swap the textures each mesh uses — a fresh mesh usually wants fresh
+   textures. This step is offered next and is skippable. It lists **every texture
+   a mesh uses** (base colour, normal, `_ram`, …), grouped **per mesh** so packing
+   several meshes at once stays clear. **If a model has its own textures baked in**
+   (common with GLB and packed FBX), Pak Rat pulls them out and shows them in an
+   **Embedded** tray under that mesh; click **Use embedded** on any texture slot
+   to drop one straight in — no need to export them by hand first.
 5. Pak Rat converts it with Blender, cooks it with your installed Unreal Engine
    5.4, retargets it onto the game's real materials, and packs the `.pak` (your
    textures, if any, go in the same pak).
@@ -149,6 +151,15 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.9
+- **The cook texture step now exposes every texture a mesh uses**, not just the
+  base-colour one — so you can swap the normal map, `_ram`, and any other slots
+  when a mesh has more than one texture.
+- **Multiple meshes in one cook are now handled cleanly.** The texture step is
+  grouped **per mesh**: each cooked mesh lists its own texture slots and its own
+  embedded textures, so packing several models into one pak no longer mixes them
+  together. Embedded textures stay tied to the model they came from.
 
 ### 2.0.8
 - **Embedded textures in your model are now usable.** Many models — especially

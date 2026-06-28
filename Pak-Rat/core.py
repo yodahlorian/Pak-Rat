@@ -976,6 +976,32 @@ def resolve_overlay_textures(mesh: str) -> list[str]:
     return sorted(texs)
 
 
+def resolve_all_textures(mesh: str) -> list[str]:
+    """Every texture the mesh uses — base colour AND the rest (normal `_n`,
+    `_ram`, etc.). Unlike resolve_overlay_textures (which keeps only `_bc` for the
+    light mesh-mode dropdown), this surfaces all swappable texture slots so the
+    cook flow can offer them when a mesh has more than one texture. Textures
+    referenced directly by the mesh are included too. Sorted; [] on failure."""
+    mesh = mesh.strip().rstrip("/")
+    ensure_oodle()
+    with tempfile.TemporaryDirectory() as tmp:
+        ua = _extract_asset(mesh, tmp)
+        if not ua:
+            return []
+        texs = set()
+        for ref in _scan_refs(ua, ua[:-7] + ".uexp"):
+            k = _classify(ref)
+            if k == "texture":
+                texs.add(ref)
+            elif k == "material":
+                mua = _extract_asset(ref, tmp)
+                if mua:
+                    for r2 in _scan_refs(mua, mua[:-7] + ".uexp"):
+                        if _classify(r2) == "texture":
+                            texs.add(r2)
+    return sorted(texs)
+
+
 @dataclass
 class RequiredFile:
     asset: str          # mount path, no ext
