@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.5**
+**Version 2.0.6**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -146,6 +146,14 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.6
+- **Clearer error when a source mesh has no geometry.** A model that exports with
+  a material but no faces (un-joined parts, stray empties, or unapplied modifiers)
+  used to import "successfully" and then fail at the cook stage with a cryptic
+  *"Cook produced no .uasset"*. Pak Rat now detects the empty mesh at **import**
+  and tells you exactly what's wrong, and the cook-stage error now includes the
+  relevant Unreal log lines when it does fire.
 
 ### 2.0.5
 - **Fixed the Blender download getting a 403 Forbidden** on first-run Cook setup —

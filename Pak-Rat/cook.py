@@ -294,8 +294,19 @@ try:
                 eal.save_asset(mi, only_if_is_dirty=False)
             mics.append(unreal.load_asset(mi))
 
-        # assign slots -> game MIs (slot i -> MI[min(i,last)])
+        # guard: a mesh can import with a material slot but ZERO triangles
+        # (source FBX carries a material but no faces). That imports "fine" but
+        # cooks to nothing, surfacing later as a cryptic "no .uasset". Catch it
+        # here with an actionable message.
         sm = unreal.load_asset(mesh_game)
+        tris = sm.get_num_triangles(0) if sm else 0
+        if not tris:
+            note("ERROR: '%s' imported with 0 triangles - source mesh has no usable "
+                 "geometry (check for un-joined parts, empties, or unapplied "
+                 "modifiers in the source file)" % mesh_name)
+            raise RuntimeError("empty geometry for %s" % mesh_name)
+
+        # assign slots -> game MIs (slot i -> MI[min(i,last)])
         slots = sm.get_editor_property("static_materials")
         if mics and slots:
             new = []
@@ -562,7 +573,16 @@ def cook_meshes(env: CookEnv, items: list[dict], progress=None) -> list[dict]:
         base = _cooked_dir() / Path(*target.split("/"))
         ua, ux = base.with_suffix(".uasset"), base.with_suffix(".uexp")
         if not ua.is_file():
-            raise RuntimeError("Cook produced no .uasset for %s" % target)
+            leaf = target.rsplit("/", 1)[-1]
+            hints = [ln for ln in so.splitlines()
+                     if leaf in ln or "LogStaticMesh" in ln
+                     or "rror" in ln or "riangle" in ln]
+            detail = "\n".join(hints[-25:]) or so[-1200:]
+            raise RuntimeError(
+                "Cook produced no .uasset for %s\n"
+                "(mesh imported but cooked to nothing - usually 0-triangle or "
+                "un-buildable geometry in the source mesh). Cook log hints:\n%s"
+                % (target, detail))
         out.append({"uasset": str(ua), "uexp": str(ux) if ux.is_file() else "",
                     "mount": target})
     say("Cook complete.", None)
