@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.7**
+**Version 2.0.8**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -72,7 +72,10 @@ Bring your own model in almost any format — Pak Rat cooks it for you.
 3. Choose your model file (**FBX, OBJ, glTF/GLB, STL, PLY, DAE or .blend**); add
    more meshes to pack together if you want.
 4. Optionally swap the textures the mesh uses — a fresh mesh usually wants fresh
-   textures. This step is offered next and is skippable.
+   textures. This step is offered next and is skippable. **If your model has its
+   own textures baked in** (common with GLB and packed FBX), Pak Rat pulls them
+   out and shows them in an **Embedded** tray; click **Use embedded** on any
+   texture slot to drop one straight in — no need to export them by hand first.
 5. Pak Rat converts it with Blender, cooks it with your installed Unreal Engine
    5.4, retargets it onto the game's real materials, and packs the `.pak` (your
    textures, if any, go in the same pak).
@@ -146,6 +149,17 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.8
+- **Embedded textures in your model are now usable.** Many models — especially
+  GLB and packed FBX — carry their own textures. Previously the cooker retargeted
+  the mesh onto the game's vanilla materials and those embedded textures were
+  dropped, so the cooked mesh showed up wearing the original game art. Now Pak Rat
+  scans your model on the texture step, extracts any embedded textures, and shows
+  them in an **Embedded** tray. Each texture slot gets a **Use embedded** button
+  so you can assign one with a click — they're injected into the same `.pak` as
+  the cooked mesh. Nothing is applied automatically: you decide which embedded
+  texture maps to which slot.
 
 ### 2.0.7
 - **Cook now forces loose cooked files** (`-nozenstore`). On some setups the cooker

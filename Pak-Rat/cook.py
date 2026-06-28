@@ -524,6 +524,88 @@ print("PAKRAT_CONVERTED", out)
 '''
 
 
+# ---------------------------------------------------------------------------
+# Embedded-texture extraction (v2.0.8)
+#
+# Many user models (esp. GLB, and FBX with embedded media) carry their own
+# textures. The cook path retargets material slots to the VANILLA game material,
+# so those textures are otherwise dropped — the cooked mesh shows up wearing the
+# original game art. Here we pull the embedded images out via Blender so the GUI
+# can let the user assign each one to a real game texture slot (per-slot picker);
+# the assigned images then ride the existing tex_items → stage_texture path.
+# ---------------------------------------------------------------------------
+_EXTRACT_TEX_SCRIPT = r'''
+import bpy, sys, os, traceback
+src, outdir = sys.argv[-2], sys.argv[-1]
+os.makedirs(outdir, exist_ok=True)
+bpy.ops.wm.read_factory_settings(use_empty=True)
+e = src.lower().rsplit(".", 1)[-1]
+try:
+    if   e == "obj":            bpy.ops.wm.obj_import(filepath=src)
+    elif e in ("gltf", "glb"):  bpy.ops.import_scene.gltf(filepath=src)
+    elif e == "stl":            bpy.ops.wm.stl_import(filepath=src)
+    elif e == "ply":            bpy.ops.wm.ply_import(filepath=src)
+    elif e == "dae":            bpy.ops.wm.collada_import(filepath=src)
+    elif e == "blend":          bpy.ops.wm.open_mainfile(filepath=src)
+    else:                       bpy.ops.import_scene.fbx(filepath=src)
+except Exception:
+    print("PAKRAT_TEX_ERR\n" + traceback.format_exc())
+
+n = 0
+for img in bpy.data.images:
+    if img.name in ("Render Result", "Viewer Node"):
+        continue
+    try:
+        if not img.has_data and not img.packed_file:
+            try: img.reload()
+            except Exception: pass
+        if not img.has_data and not img.packed_file:
+            continue
+        if not (img.size[0] and img.size[1]):
+            continue
+        safe = "".join(c if (c.isalnum() or c in "._-") else "_"
+                       for c in (img.name or "")) or ("img%d" % n)
+        dst = os.path.join(outdir, "%02d_%s.png" % (n, safe))
+        img.filepath_raw = dst
+        img.file_format = "PNG"
+        img.save()
+        print("PAKRAT_TEX", dst)
+        n += 1
+    except Exception:
+        print("PAKRAT_TEX_SKIP " + (img.name or "?"))
+print("PAKRAT_TEX_DONE %d" % n)
+'''
+
+
+def extract_embedded_textures(src: str, env: "CookEnv | None" = None,
+                              progress=None) -> list[str]:
+    """Dump any textures embedded in `src` to PNGs and return their paths.
+
+    Best-effort: returns [] if Blender is unavailable, the model carries no
+    textures, or extraction fails. Each model gets its own scratch folder under
+    the toolchain home (cleared first so stale extracts don't leak across runs).
+    """
+    env = env or cook_env()
+    if env is None or not env.blender_exe:
+        return []
+    outdir = home() / "_embed_tex" / (Path(src).stem or "model")
+    if outdir.is_dir():
+        for p in outdir.glob("*.png"):
+            try: p.unlink()
+            except OSError: pass
+    outdir.mkdir(parents=True, exist_ok=True)
+    if progress:
+        progress("Scanning %s for embedded textures…" % Path(src).name, None)
+    script = home() / "_extract_tex.py"
+    script.write_text(_EXTRACT_TEX_SCRIPT, encoding="utf-8")
+    try:
+        core._run([env.blender_exe, "--background", "--python", str(script),
+                   "--", src, str(outdir)])
+    except Exception:
+        return []
+    return sorted(str(p) for p in outdir.glob("*.png")) if outdir.is_dir() else []
+
+
 def _ue(env: CookEnv, *args: str) -> subprocess.CompletedProcess:
     return core._run([env.ue_cmd, env.uproject, *args,
                       "-stdout", "-unattended", "-nopause", "-nosplash"])
