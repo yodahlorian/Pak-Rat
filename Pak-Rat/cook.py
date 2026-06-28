@@ -562,27 +562,50 @@ def cook_meshes(env: CookEnv, items: list[dict], progress=None) -> list[dict]:
         raise RuntimeError("Import failed:\n%s\n%s" % (res_txt, (r.stderr or "")[-800:]))
 
     say("Cooking (first run builds shaders — may take a few minutes)…", None)
-    r = _ue(env, "-run=cook", "-targetplatform=Windows", "-unversioned", "-cookall")
+    # -nozenstore forces LOOSE cooked files (.uasset/.uexp). Some UE configs
+    # otherwise write cooked data into the Zen/IoStore cache (.ucas/.utoc) and no
+    # loose .uasset appears, which looks like "cooked to nothing".
+    r = _ue(env, "-run=cook", "-targetplatform=Windows", "-unversioned",
+            "-cookall", "-nozenstore")
     so = r.stdout or ""
+    cook_log = home() / "last_cook.log"
+    try:
+        cook_log.write_text(so or (r.stderr or ""), encoding="utf-8")
+    except OSError:
+        pass
     if "Success" not in so and "Packages Remain 0" not in so:
-        raise RuntimeError("Cook failed:\n%s" % (so[-1200:] or (r.stderr or "")[-1200:]))
+        raise RuntimeError("Cook failed (full log: %s):\n%s"
+                           % (cook_log, so[-1200:] or (r.stderr or "")[-1200:]))
 
+    cooked_root = project_dir() / "Saved" / "Cooked"
     out = []
     for it in items:
         target = it["target"]
+        leaf = target.rsplit("/", 1)[-1]
         base = _cooked_dir() / Path(*target.split("/"))
         ua, ux = base.with_suffix(".uasset"), base.with_suffix(".uexp")
         if not ua.is_file():
-            leaf = target.rsplit("/", 1)[-1]
-            hints = [ln for ln in so.splitlines()
-                     if leaf in ln or "LogStaticMesh" in ln
-                     or "rror" in ln or "riangle" in ln]
-            detail = "\n".join(hints[-25:]) or so[-1200:]
-            raise RuntimeError(
-                "Cook produced no .uasset for %s\n"
-                "(mesh imported but cooked to nothing - usually 0-triangle or "
-                "un-buildable geometry in the source mesh). Cook log hints:\n%s"
-                % (target, detail))
+            # cooked layout can vary (platform subfolder, /Game mount name) —
+            # search the whole cooked tree for <leaf>.uasset before giving up.
+            matches = sorted(cooked_root.rglob(leaf + ".uasset")) \
+                if cooked_root.is_dir() else []
+            if matches:
+                ua = matches[0]
+                ux = ua.with_suffix(".uexp")
+            else:
+                produced = []
+                if cooked_root.is_dir():
+                    produced = [str(p.relative_to(cooked_root))
+                                for p in cooked_root.rglob("*")
+                                if p.suffix.lower() in (".uasset", ".ucas", ".utoc")][:40]
+                raise RuntimeError(
+                    "Cook produced no .uasset for %s\n"
+                    "No '%s.uasset' found anywhere under the cooked output. If the "
+                    "list below shows .ucas/.utoc, the cooker wrote IoStore "
+                    "containers instead of loose files.\n"
+                    "Cooked output (%d entries; full log: %s):\n%s"
+                    % (target, leaf, len(produced), cook_log,
+                       "\n".join(produced) or "(empty - the cooker produced nothing)"))
         out.append({"uasset": str(ua), "uexp": str(ux) if ux.is_file() else "",
                     "mount": target})
     say("Cook complete.", None)

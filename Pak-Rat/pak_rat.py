@@ -44,7 +44,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
 
-APP_VERSION = "2.0.6"
+APP_VERSION = "2.0.7"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):

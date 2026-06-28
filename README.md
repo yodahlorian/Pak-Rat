@@ -1,6 +1,6 @@
 # Pak Rat
 
-**Version 2.0.6**
+**Version 2.0.7**
 
 **Automatic asset packager + mesh cooker for Retro Rewind (UE 5.4).**
 
@@ -146,6 +146,14 @@ distribution. See `core.ensure_oodle()`.
 ---
 
 ## Changelog
+
+### 2.0.7
+- **Cook now forces loose cooked files** (`-nozenstore`). On some setups the cooker
+  wrote its output into the Zen/IoStore cache instead of loose `.uasset` files, so
+  a perfectly good mesh looked like it "cooked to nothing." Pak Rat now also
+  searches the whole cooked tree for the asset, writes the full cook log to
+  `last_cook.log`, and — if it still can't find the file — lists exactly what the
+  cooker produced so the cause is obvious.
 
 ### 2.0.6
 - **Clearer error when a source mesh has no geometry.** A model that exports with
