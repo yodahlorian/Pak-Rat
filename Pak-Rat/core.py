@@ -74,7 +74,43 @@ INJ_MAIN = lambda: VENDOR("injector", "src", "main.py")         # noqa: E731
 
 TEXTURES_CLEAN = lambda: _data_dir() / "textures_clean.txt"     # noqa: E731
 
-VALID_IMAGE_EXTS = {".png", ".dds"}
+# Texture-replacement input is validated by CONTENT (can_decode_image) for
+# MAXIMUM COMPATIBILITY: any file the installed Pillow can actually decode is
+# accepted, regardless of extension — the whole pipeline is format-agnostic
+# (prepare_image just does Image.open(path).convert("RGBA")). The curated
+# extension tuples below only drive the file-dialog filters for nice UX; a
+# "All files (*)" entry always lets the user pick anything and the content
+# check is the real gate. Two slot classes:
+#   base colour (_bc): any decodable image (sRGB display data; lossy ok).
+#   data maps (_n/_ram/_ao/masks): same, but hard-lossy codecs (jpeg) are
+#   rejected — lossy compression corrupts per-channel normal/mask data.
+_LOSSY_PIL_FORMATS = {"JPEG", "MPO"}     # lossy codecs unfit for normal/mask data
+
+# Curated, dependency-free raster formats surfaced in the dialog filters. Not an
+# exhaustive list of Pillow's codecs by design (validation is content-based, so
+# unlisted-but-decodable files still work via "All files"). Excludes formats
+# that need external tools or aren't raster textures (eps/ps, fits/grib/hdf, …).
+IMAGE_FILTER_LOSSLESS = (".png", ".tga", ".tif", ".tiff", ".bmp", ".dib",
+                         ".dds", ".webp", ".psd", ".qoi", ".sgi", ".pcx",
+                         ".ppm", ".pgm", ".pbm", ".pnm", ".ico", ".icns",
+                         ".im", ".pfm", ".xpm", ".gif", ".rgba", ".rgb")
+IMAGE_FILTER_LOSSY = (".jpg", ".jpeg", ".jfif", ".jpe")
+
+
+def can_decode_image(path: str):
+    """(ok, FORMAT): whether the installed Pillow can open `path` as an image,
+    plus the detected format name (e.g. 'PNG'). Cheap — verifies the header,
+    doesn't decode full pixel data. (False, "") on anything unreadable."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            fmt = (im.format or "").upper()
+            im.verify()
+        return True, fmt
+    except Exception:
+        return False, ""
+
+
 VALID_MESH_EXTS = {".uasset", ".fbx"}  # placeholder — confirm at step 4
 
 
@@ -558,8 +594,18 @@ class ImageInfo:
     spec: TargetSpec       # carries uasset/work so run_pipeline is self-sufficient
 
 
-def validate_image_ext(path: str) -> bool:
-    return Path(path).suffix.lower() in VALID_IMAGE_EXTS
+def validate_image_ext(path: str, allow_lossy: bool = True) -> bool:
+    """True if the installed Pillow can actually decode `path` as an image
+    (content-based, so any decodable file is accepted regardless of extension —
+    maximum compatibility). `allow_lossy=False` (data maps: _n/_ram/_ao/masks)
+    additionally rejects lossy codecs (jpeg) that would corrupt per-channel
+    data. Kept name + path signature for the existing GUI seam."""
+    ok, fmt = can_decode_image(path)
+    if not ok:
+        return False
+    if not allow_lossy and fmt in _LOSSY_PIL_FORMATS:
+        return False
+    return True
 
 
 def prepare_image(path: str, spec: TargetSpec) -> ImageInfo:
@@ -977,28 +1023,29 @@ def resolve_overlay_textures(mesh: str) -> list[str]:
 
 
 def resolve_all_textures(mesh: str) -> list[str]:
-    """Every texture the mesh uses — base colour AND the rest (normal `_n`,
-    `_ram`, etc.). Unlike resolve_overlay_textures (which keeps only `_bc` for the
-    light mesh-mode dropdown), this surfaces all swappable texture slots so the
-    cook flow can offer them when a mesh has more than one texture. Textures
-    referenced directly by the mesh are included too. Sorted; [] on failure."""
+    """Swappable texture slots for a cooked mesh — accurately scoped to the
+    textures this mesh's materials ACTUALLY use, rather than every /Game/ string
+    that happens to sit in the package's name table.
+
+    We anchor on the real base-colour (`_bc`) references (mesh -> MI material ->
+    its `_bc`), then expand each `_bc` to its sibling map family (`_n`/`_ram`/
+    `_ao`/…) via related_textures (constrained to the same folder + stem). This
+    fixes the blind-byte-scan leak where a shared parent material's default maps
+    bled in — e.g. T_DECO_Robot_*_ao surfacing while editing a carpet. Sorted;
+    [] on failure."""
     mesh = mesh.strip().rstrip("/")
+    bc = set(resolve_overlay_textures(mesh))      # real _bc via mesh -> MI -> _bc
+    # a mesh may also reference a _bc directly (no material indirection)
     ensure_oodle()
     with tempfile.TemporaryDirectory() as tmp:
         ua = _extract_asset(mesh, tmp)
-        if not ua:
-            return []
-        texs = set()
-        for ref in _scan_refs(ua, ua[:-7] + ".uexp"):
-            k = _classify(ref)
-            if k == "texture":
-                texs.add(ref)
-            elif k == "material":
-                mua = _extract_asset(ref, tmp)
-                if mua:
-                    for r2 in _scan_refs(mua, mua[:-7] + ".uexp"):
-                        if _classify(r2) == "texture":
-                            texs.add(r2)
+        if ua:
+            for ref in _scan_refs(ua, ua[:-7] + ".uexp"):
+                if _classify(ref) == "texture" and ref.endswith("_bc"):
+                    bc.add(ref)
+    texs = set(bc)
+    for b in bc:
+        texs.update(related_textures(b))          # folder+stem-scoped siblings
     return sorted(texs)
 
 

@@ -30,8 +30,8 @@ from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QDialog,
     QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMenu, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea,
-    QSplashScreen, QToolTip, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
-    QWizard, QWizardPage,
+    QSplashScreen, QToolButton, QToolTip, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget, QWizard, QWizardPage,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,7 +44,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
 
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.0.10-beta1"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -130,6 +130,74 @@ def resource_path(name: str) -> str:
 def _basename(asset: str) -> str:
     """Leaf name of an asset path, e.g. .../textures/MI_Detail_01 -> MI_Detail_01."""
     return asset.rstrip("/").split("/")[-1]
+
+
+# ---------------------------------------------------------------------------
+# Texture-suffix meanings — surfaced as inline tags + per-row tooltips on
+# texture lists, summarised in the page legend / ⓘ. Keyed by the lowercase
+# suffix after the final underscore (T_Foo_bc -> "bc").
+# ---------------------------------------------------------------------------
+TEXTURE_TYPES = {
+    "bc":   ("Base Color",        "Primary diffuse / albedo colour map — the main visible colour of the surface."),
+    "n":    ("Normal",            "Surface-normal data used for lighting; fakes bumps/detail without extra geometry."),
+    "ram":  ("Packed Mask",       "Roughness (R), Ambient Occlusion (G) and Metallic (B) packed into one image's channels."),
+    "ao":   ("Ambient Occlusion", "Grayscale soft-shadow map for cracks, creases and corners where light is blocked."),
+    "orm":  ("ORM Packed",        "Occlusion (R), Roughness (G), Metallic (B) packed into one image's channels."),
+    "d":    ("Diffuse",           "Diffuse colour map."),
+    "m":    ("Metallic",          "Metallic mask — which areas read as metal."),
+    "r":    ("Roughness",         "Roughness map — how sharp/blurry reflections are."),
+    "e":    ("Emissive",          "Emissive / glow map — areas that emit light."),
+    "emi":  ("Emissive",          "Emissive / glow map — areas that emit light."),
+    "mask": ("Mask",              "Generic channel mask."),
+    "h":    ("Height",            "Height / displacement map."),
+    "s":    ("Specular",          "Specular map."),
+}
+
+# Static legend shown at the top of texture pages (compact) and as the ⓘ tooltip.
+TEXTURE_LEGEND = (
+    "Texture map types:  "
+    "_bc = Base Color · _n = Normal · _ram = Packed Mask (Roughness/AO/Metallic) "
+    "· _ao = Ambient Occlusion.  "
+    "Base Color accepts any image (incl. JPG); data maps (_n/_ram/_ao/…) need a "
+    "lossless format — PNG, TGA, TIFF, BMP or DDS — to keep their channel data intact."
+)
+TEXTURE_LEGEND_FULL = "Texture map types\n\n" + "\n".join(
+    f"  _{suf:<4} {lbl} — {desc}" for suf, (lbl, desc) in TEXTURE_TYPES.items())
+
+
+def _tex_suffix(mount: str) -> str:
+    """Lowercase map-type suffix of a texture leaf (bc/n/ram/…), or '' if none."""
+    leaf = _basename(mount)
+    if "_" in leaf:
+        suf = leaf.rsplit("_", 1)[-1].lower()
+        if suf in TEXTURE_TYPES:
+            return suf
+    return ""
+
+
+def _tex_type_label(mount: str) -> str:
+    suf = _tex_suffix(mount)
+    return TEXTURE_TYPES[suf][0] if suf else ""
+
+
+def _tex_type_desc(mount: str) -> str:
+    suf = _tex_suffix(mount)
+    return TEXTURE_TYPES[suf][1] if suf else ""
+
+
+def _is_base_color(mount: str) -> bool:
+    return _basename(mount).lower().endswith("_bc")
+
+
+def _image_filter(allow_lossy: bool = True) -> str:
+    """Qt getOpenFileName filter for a texture slot. Lossy formats (jpg) appear
+    only for base-colour slots; data maps stay lossless. An 'All files' entry is
+    always included — validation is content-based, so any decodable image works."""
+    exts = list(core.IMAGE_FILTER_LOSSLESS)
+    if allow_lossy:
+        exts = list(core.IMAGE_FILTER_LOSSY) + exts
+    globs = " ".join("*" + e for e in exts)
+    return f"Images ({globs});;All files (*)"
 
 
 # ---------------------------------------------------------------------------
@@ -706,8 +774,8 @@ class TextureListPage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle("Choose your replacement textures")
-        self.setSubTitle("One pak can hold several texture swaps — "
-                         "pick a PNG or DDS for each.")
+        self.setSubTitle("One pak can hold several texture swaps — pick an image "
+                         "for each (PNG, JPG, TGA, TIFF, BMP, DDS, …).")
         self._rows = []
         self._stretch_added = False
 
@@ -799,14 +867,24 @@ class TextureListPage(QWizardPage):
                 return
 
     def _pick(self, rec):
+        allow_lossy = _is_base_color(rec["mount"])
         path, _ = QFileDialog.getOpenFileName(
             self, f"Replacement for {_basename(rec['mount'])}",
-            _basename(rec["mount"]), "Images (*.png *.dds);;All files (*)")
+            _basename(rec["mount"]), _image_filter(allow_lossy))
         if not path:
             return
-        if not core.validate_image_ext(path):
-            QMessageBox.warning(self, "Wrong file type",
-                                "Please choose a PNG or DDS file.")
+        if not core.validate_image_ext(path, allow_lossy=allow_lossy):
+            if not allow_lossy and core.can_decode_image(path)[0]:
+                QMessageBox.warning(
+                    self, "Lossy format not allowed",
+                    f"{_basename(rec['mount'])} is a {_tex_type_label(rec['mount'])} "
+                    "map — lossy formats like JPG corrupt its channel data. Use a "
+                    "lossless format: PNG, TGA, TIFF, BMP or DDS.")
+            else:
+                QMessageBox.warning(
+                    self, "Unreadable image",
+                    "That file couldn't be read as an image. Choose a standard "
+                    "image file (PNG, JPG, TGA, TIFF, BMP, DDS, …).")
             return
         self.wizard().tex_items[rec["mount"]] = path
         rec["status"].setText("✓ " + Path(path).name)
@@ -1207,6 +1285,24 @@ class CookTexturePage(QWizardPage):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._container)
 
+        # legend header — static one-liner + an ⓘ for the full type reference
+        legend_row = QWidget()
+        lr = QHBoxLayout(legend_row)
+        lr.setContentsMargins(0, 0, 0, 0)
+        info_btn = QToolButton()
+        info_btn.setText("ⓘ")
+        info_btn.setToolTip(TEXTURE_LEGEND_FULL)
+        info_btn.setStyleSheet(f"color:{CYAN}; font-weight:700; border:none;")
+        info_btn.setCursor(Qt.PointingHandCursor)
+        info_btn.clicked.connect(
+            lambda: QMessageBox.information(self, "Texture map types",
+                                            TEXTURE_LEGEND_FULL))
+        legend = QLabel(TEXTURE_LEGEND)
+        legend.setStyleSheet(f"color:{MUTED}; font-size:11px;")
+        legend.setWordWrap(True)
+        lr.addWidget(info_btn, 0, Qt.AlignTop)
+        lr.addWidget(legend, 1)
+
         self.embed_hint = QLabel("")
         self.embed_hint.setStyleSheet(f"color:{CYAN}; font-size:11px;")
         self.embed_hint.setWordWrap(True)
@@ -1217,6 +1313,7 @@ class CookTexturePage(QWizardPage):
         self.hint.setWordWrap(True)
 
         lay = QVBoxLayout(self)
+        lay.addWidget(legend_row)
         lay.addWidget(scroll)
         lay.addWidget(self.embed_hint)
         lay.addWidget(self.hint)
@@ -1277,22 +1374,75 @@ class CookTexturePage(QWizardPage):
         block = {"target": target, "tray_w": tray_w, "tray_layout": tray_h,
                  "recs": []}
         if mounts:
-            for m in mounts:
-                self._add_row(block, m)
+            # Three buckets, scoped to what this asset actually uses:
+            #   primary    = the asset's OWN base colour (_bc) — the slot you
+            #                almost always want; always shown, no checkbox.
+            #   own maps   = the asset's OWN data maps (_n/_ram/_ao/…) — the mesh
+            #                normally needs them, so included (checked) by default
+            #                but individually disinclude-able.
+            #   shared     = library textures (surfaces/…) reused across many
+            #                props — shown but UNchecked by default, since swapping
+            #                one changes every asset that uses it.
+            own_bc = [m for m in mounts
+                      if _is_base_color(m) and not core._is_shared(m)]
+            own_maps = [m for m in mounts
+                        if not _is_base_color(m) and not core._is_shared(m)]
+            shared = [m for m in mounts if core._is_shared(m)]
+            for m in own_bc:
+                self._add_row(block, m, additional=False)
+            if own_maps:
+                self._vbox.addWidget(self._sub_header(
+                    "Additional textures", own_maps,
+                    "These maps are included because the original mesh uses them. "
+                    "Untick any you don't want to touch."))
+                for m in own_maps:
+                    self._add_row(block, m, additional=True, default_on=True)
+            if shared:
+                self._vbox.addWidget(self._sub_header(
+                    "Shared textures (used by other assets too)", shared,
+                    "Library textures reused across many props. Off by default — "
+                    "swapping one changes every asset that uses it. Tick to "
+                    "override anyway."))
+                for m in shared:
+                    self._add_row(block, m, additional=True, default_on=False)
         else:
             note = QLabel("    (no swappable textures found for this mesh)")
             note.setStyleSheet(f"color:{MUTED};")
             self._vbox.addWidget(note)
         self._blocks.append(block)
 
-    def _add_row(self, block, mount):
+    def _sub_header(self, title, mounts, tip):
+        types = []
+        for m in mounts:
+            lbl = _tex_type_label(m)
+            if lbl and lbl not in types:
+                types.append(lbl)
+        suffix = f" ({', '.join(types)})" if types else ""
+        sub = QLabel(f"  {title}{suffix}")
+        sub.setStyleSheet(f"color:{CYAN}; font-weight:600; margin-top:2px;")
+        sub.setToolTip(tip)
+        return sub
+
+    def _add_row(self, block, mount, additional=False, default_on=True):
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(12, 0, 0, 0)
+        # include checkbox (additional/shared maps only) — `default_on` sets its
+        # initial state; unticking disincludes the slot so it can't be swapped.
+        include = None
+        if additional:
+            include = QCheckBox()
+            include.setChecked(default_on)
+            include.setToolTip("Include this map — untick to leave it untouched.")
+            h.addWidget(include)
         thumb = Thumb(spin=True)
-        name = QLabel(_basename(mount))
+        tag = _tex_type_label(mount)
+        nm = _basename(mount)
+        name = QLabel(f"{nm}   [{tag}]" if tag else nm)
         name.setMinimumWidth(150)
         name.setWordWrap(True)
+        if tag:
+            name.setToolTip(f"{tag} — {_tex_type_desc(mount)}")
         status = QLabel("unchanged")
         status.setStyleSheet(f"color:{MUTED};")
         info = QWidget()
@@ -1305,9 +1455,12 @@ class CookTexturePage(QWizardPage):
         btn = QPushButton("Choose…")
         your = Thumb(spin=False)
         rec = {"mount": mount, "target": block["target"], "status": status,
-               "thumb": thumb, "your": your, "embed_btn": embed_btn}
+               "thumb": thumb, "your": your, "embed_btn": embed_btn,
+               "btn": btn, "include": include, "additional": additional}
         btn.clicked.connect(lambda _=False, rec=rec: self._pick(rec))
         embed_btn.clicked.connect(lambda _=False, rec=rec: self._pick_embedded(rec))
+        if include is not None:
+            include.toggled.connect(lambda on, rec=rec: self._set_included(rec, on))
         h.addWidget(_preview_cell(thumb))
         h.addWidget(info, 1)
         h.addWidget(embed_btn)
@@ -1316,6 +1469,23 @@ class CookTexturePage(QWizardPage):
         self._vbox.addWidget(row)
         block["recs"].append(rec)
         self._rows.append(rec)
+        if include is not None and not default_on:   # start disincluded
+            self._set_included(rec, False)
+
+    def _set_included(self, rec, on):
+        """Enable/disable a disinclude-able (additional) slot. Disincluding drops
+        any chosen replacement so it won't be packed."""
+        rec["btn"].setEnabled(on)
+        if rec["embed_btn"].isVisible():
+            rec["embed_btn"].setEnabled(on)
+        if not on:
+            self.wizard().cook_tex_items.pop(rec["mount"], None)
+            rec["status"].setText("not included")
+            rec["status"].setStyleSheet(f"color:{MUTED};")
+            rec["your"].clear()
+        else:
+            rec["status"].setText("unchanged")
+            rec["status"].setStyleSheet(f"color:{MUTED};")
 
     # --- embedded-texture scan ---------------------------------------------
     def _start_embed_scan(self, items):
@@ -1342,6 +1512,9 @@ class CookTexturePage(QWizardPage):
                 self._build_tray(block, pngs)
                 for rec in block["recs"]:
                     rec["embed_btn"].setVisible(True)
+                    inc = rec.get("include")
+                    if inc is not None and not inc.isChecked():
+                        rec["embed_btn"].setEnabled(False)
 
     def _build_tray(self, block, pngs):
         lay = block["tray_layout"]
@@ -1400,14 +1573,24 @@ class CookTexturePage(QWizardPage):
             rec["your"].set_image(path)
 
     def _pick(self, rec):
+        allow_lossy = _is_base_color(rec["mount"])
         path, _ = QFileDialog.getOpenFileName(
             self, f"Texture for {_basename(rec['mount'])}",
-            _basename(rec["mount"]), "Images (*.png *.dds);;All files (*)")
+            _basename(rec["mount"]), _image_filter(allow_lossy))
         if not path:
             return
-        if not core.validate_image_ext(path):
-            QMessageBox.warning(self, "Wrong file type",
-                                "Please choose a PNG or DDS file.")
+        if not core.validate_image_ext(path, allow_lossy=allow_lossy):
+            if not allow_lossy and core.can_decode_image(path)[0]:
+                QMessageBox.warning(
+                    self, "Lossy format not allowed",
+                    f"{_basename(rec['mount'])} is a {_tex_type_label(rec['mount'])} "
+                    "map — lossy formats like JPG corrupt its channel data. Use a "
+                    "lossless format: PNG, TGA, TIFF, BMP or DDS.")
+            else:
+                QMessageBox.warning(
+                    self, "Unreadable image",
+                    "That file couldn't be read as an image. Choose a standard "
+                    "image file (PNG, JPG, TGA, TIFF, BMP, DDS, …).")
             return
         self._assign(rec, path)
 
@@ -1992,10 +2175,24 @@ class CombineSelectPage(QWizardPage):
             sel_all.setStyleSheet("color:#888;")
             self._vbox.addWidget(sel_all)
             group_cbs = []
-            for a in assets:
+            # Organise each mod's assets the same way as the asset pickers:
+            # Meshes / Textures category headers, then family sub-headers.
+            by_mount = {a.mount: a for a in assets}
+            for level, text, mount in _grouped_order(list(by_mount)):
+                if mount is None:                       # category / family header
+                    if level == 0:
+                        hdr = QLabel(f"    ── {text} ──")
+                        hdr.setStyleSheet(f"color:{MUTED}; font-weight:600; "
+                                          "margin-top:3px;")
+                    else:
+                        hdr = QLabel(f"      {text}")
+                        hdr.setStyleSheet(f"color:{MUTED};")
+                    self._vbox.addWidget(hdr)
+                    continue
+                a = by_mount[mount]
                 tag = self._KIND_TAG.get(a.kind, "···")
                 warn = "  ⚠" if overlap.get(a.mount, 0) > 1 else ""
-                cb = _HoverCheckBox(f"    [{tag}]  {a.leaf}{warn}")
+                cb = _HoverCheckBox(f"        [{tag}]  {a.leaf}{warn}")
                 if warn:
                     cb.setStyleSheet("color:#c08a2e;")
                 cb.toggled.connect(lambda *_: self.completeChanged.emit())
