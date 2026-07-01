@@ -37,14 +37,15 @@ from PySide6.QtWidgets import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
 import cook  # noqa: E402  (v2 UE cooking toolchain)
+import inject  # noqa: E402  (v3 "Add Asset" runtime injection engine)
 
 # Page ids
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
-    PAGE_COMBINESRC, PAGE_COMBINESEL = range(15)
+    PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT = range(16)
 
-APP_VERSION = "2.0.10-beta1"
+APP_VERSION = "3.0.0-beta1"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -459,15 +460,15 @@ class ModePage(QWizardPage):
         self.setSubTitle("Choose the type of swap you want to build.")
 
         self.rb_regular = QRadioButton("Regular Texture")
-        self.rb_mesh = QRadioButton("Mesh + Texture")
         self.rb_cook = QRadioButton("Cook Mesh from a 3D file  (FBX / OBJ / glTF / …)")
+        self.rb_add = QRadioButton("Add Asset  (inject brand-new content)")
         self.rb_extract = QRadioButton("Extract Asset")
         self.rb_combine = QRadioButton("Combine Mods")
         self.rb_regular.setChecked(True)
 
         self.group = QButtonGroup(self)
         self.group.addButton(self.rb_regular, 0)
-        self.group.addButton(self.rb_mesh, 1)
+        self.group.addButton(self.rb_add, 1)
         self.group.addButton(self.rb_extract, 2)
         self.group.addButton(self.rb_cook, 3)
         self.group.addButton(self.rb_combine, 4)
@@ -478,17 +479,20 @@ class ModePage(QWizardPage):
         lab1.setStyleSheet("color:#888;")
         lay.addWidget(lab1)
         lay.addSpacing(12)
-        lay.addWidget(self.rb_mesh)
-        lab2 = QLabel("    Swap an already-cooked mesh and its texture together.")
-        lab2.setStyleSheet("color:#888;")
-        lay.addWidget(lab2)
-        lay.addSpacing(12)
         # Cooker — only meaningful when an Unreal Engine install is present.
         lay.addWidget(self.rb_cook)
         self.cook_lab = QLabel("    Bring your own model (any common 3D format) — "
                                "Pak Rat cooks it with Unreal for you.")
         self.cook_lab.setStyleSheet("color:#888;")
         lay.addWidget(self.cook_lab)
+        lay.addSpacing(12)
+        # Add Asset (v3) — needs UE4SS for the runtime catalogue hook.
+        lay.addWidget(self.rb_add)
+        self.add_lab = QLabel("    Inject a brand-new item (cooked from your model) "
+                              "into the game's catalogue — a true addition, not a swap.")
+        self.add_lab.setStyleSheet("color:#888;")
+        self.add_lab.setWordWrap(True)
+        lay.addWidget(self.add_lab)
         lay.addSpacing(12)
         lay.addWidget(self.rb_extract)
         lab3 = QLabel("    Pull an original mesh or texture out of the game to edit "
@@ -513,6 +517,14 @@ class ModePage(QWizardPage):
         self.cook_note.setVisible(False)
         lay.addWidget(self.cook_note)
 
+        # Shown only when UE4SS is not installed (Add Asset hidden then).
+        self.add_note = QLabel("NOTE: Additional injection requires UE4SS "
+                               "(RE-UE4SS) installed in Retro Rewind.")
+        self.add_note.setWordWrap(True)
+        self.add_note.setStyleSheet("color:#c08a2e; font-style:italic;")
+        self.add_note.setVisible(False)
+        lay.addWidget(self.add_note)
+
     def initializePage(self):
         self.wizard().mode = "regular"
         # The cooker needs an installed Unreal Engine; hide it (and show a hint)
@@ -526,11 +538,27 @@ class ModePage(QWizardPage):
         self.cook_note.setVisible(not avail)
         if not avail and self.rb_cook.isChecked():
             self.rb_regular.setChecked(True)
+        # Add Asset needs UE4SS (runtime catalogue hook). Hide + hint otherwise.
+        try:
+            ue4ss = inject.ue4ss_available()
+        except Exception:
+            ue4ss = False
+        self.rb_add.setVisible(ue4ss)
+        self.add_lab.setVisible(ue4ss)
+        self.add_note.setVisible(not ue4ss)
+        try:
+            more = ue4ss and inject.has_additions()
+        except Exception:
+            more = False
+        self.rb_add.setText("Add more assets  (inject brand-new content)" if more
+                            else "Add Asset  (inject brand-new content)")
+        if not ue4ss and self.rb_add.isChecked():
+            self.rb_regular.setChecked(True)
         self.group.idToggled.connect(self._on_toggle)
 
     def _on_toggle(self, _id, checked):
-        if self.rb_mesh.isChecked():
-            self.wizard().mode = "mesh"
+        if self.rb_add.isChecked():
+            self.wizard().mode = "add"
         elif self.rb_cook.isChecked():
             self.wizard().mode = "cook"
         elif self.rb_extract.isChecked():
@@ -544,7 +572,7 @@ class ModePage(QWizardPage):
         mode = getattr(self.wizard(), "mode", "regular")
         # Cooker path ALWAYS starts at the setup page (step 1). It short-circuits
         # instantly when the toolchain is already installed.
-        if mode == "cook":
+        if mode in ("cook", "add"):
             return PAGE_SETUP
         # Combine has no single-asset picker — straight to choosing source paks.
         if mode == "combine":
@@ -1102,7 +1130,77 @@ class SetupPage(QWizardPage):
         return self._done
 
     def nextId(self):
+        if getattr(self.wizard(), "mode", "") == "add":
+            return PAGE_ADDINPUT
         return PAGE_ASSET
+
+
+# ---------------------------------------------------------------------------
+# Add-asset input page (v3) — pick a model, name it, choose a category.
+# ---------------------------------------------------------------------------
+class AddInputPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Add a new item")
+        self.setSubTitle("Bring your own model — Pak Rat cooks it into a brand-new "
+                         "catalogue item and registers it with UE4SS.")
+        self._fbx = None
+
+        self.pick_btn = QPushButton("Choose a 3D model…")
+        self.pick_lbl = QLabel("No model selected.")
+        self.pick_lbl.setStyleSheet("color:#888;")
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Item name (letters/numbers, e.g. MyLamp)")
+        self.cat_combo = QComboBox()
+        for key in inject.CATEGORIES:
+            self.cat_combo.addItem(inject.CATEGORY_LABELS.get(key, key), key)
+
+        note = QLabel("Beta: metadata (price/name shown in-store) uses the game's "
+                      "default for now; the item spawns and is placeable.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#c08a2e; font-style:italic;")
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.pick_btn)
+        lay.addWidget(self.pick_lbl)
+        lay.addSpacing(10)
+        lay.addWidget(QLabel("Name"))
+        lay.addWidget(self.name_edit)
+        lay.addSpacing(10)
+        lay.addWidget(QLabel("Catalogue category"))
+        lay.addWidget(self.cat_combo)
+        lay.addStretch(1)
+        lay.addWidget(note)
+
+        self.pick_btn.clicked.connect(self._pick)
+        self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
+
+    def _pick(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a 3D model", "",
+            "3D models (*.fbx *.obj *.gltf *.glb *.stl *.ply *.dae *.blend);;All files (*)")
+        if path:
+            self._fbx = path
+            self.pick_lbl.setText(_basename(path))
+            if not self.name_edit.text().strip():
+                stem = Path(path).stem
+                self.name_edit.setText("".join(c for c in stem if c.isalnum()) or "MyItem")
+            self.completeChanged.emit()
+
+    def isComplete(self):
+        return bool(self._fbx) and bool(self.name_edit.text().strip())
+
+    def validatePage(self):
+        w = self.wizard()
+        w.add_items = [{
+            "fbx": self._fbx,
+            "name": "".join(c for c in self.name_edit.text() if c.isalnum() or c == "_"),
+            "category": self.cat_combo.currentData(),
+        }]
+        return True
+
+    def nextId(self):
+        return PAGE_PROCESS
 
 
 # ---------------------------------------------------------------------------
@@ -1611,7 +1709,7 @@ class PipelineWorker(QThread):
 
     def __init__(self, mode, mesh_plan, mesh_user_files,
                  cook_items=None, tex_items=None, combine_selected=None,
-                 cook_tex_items=None):
+                 cook_tex_items=None, add_items=None):
         super().__init__()
         self.mode = mode
         self.mesh_plan = mesh_plan
@@ -1620,6 +1718,7 @@ class PipelineWorker(QThread):
         self.tex_items = tex_items or {}
         self.combine_selected = combine_selected or []
         self.cook_tex_items = cook_tex_items or {}
+        self.add_items = add_items or []
 
     def run(self):
         try:
@@ -1629,6 +1728,11 @@ class PipelineWorker(QThread):
                 pak = cook.run_cook_pipeline_multi(
                     items, tex_items=self.cook_tex_items,
                     progress=lambda m, p=None: self.status.emit(m))
+            elif self.mode == "add":
+                result = inject.run_add_pipeline(
+                    self.add_items,
+                    progress=lambda m, p=None: self.status.emit(m))
+                pak = result["pak"]
             elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
@@ -1673,7 +1777,8 @@ class ProcessPage(QWizardPage):
             getattr(w, "mode", "regular"), getattr(w, "mesh_plan", None),
             getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}),
             getattr(w, "tex_items", {}), getattr(w, "combine_selected", []),
-            getattr(w, "cook_tex_items", {}))
+            getattr(w, "cook_tex_items", {}),
+            add_items=getattr(w, "add_items", []))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)
@@ -2310,6 +2415,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_EXTRACTDONE, ExtractDonePage())
         self.setPage(PAGE_COMBINESRC, CombineSourcePage())
         self.setPage(PAGE_COMBINESEL, CombineSelectPage())
+        self.setPage(PAGE_ADDINPUT, AddInputPage())
         self.setStartId(PAGE_MODE)
 
         # On the final "Done" page, Back should start the whole flow over at
