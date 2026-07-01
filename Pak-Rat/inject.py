@@ -259,7 +259,7 @@ def manifest_items() -> dict[str, list[dict]]:
 def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
     cp = configparser.ConfigParser()
     cp["pakrat"] = {
-        "version": "3.0.0-beta5",
+        "version": "3.0.0-beta6",
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     for cat, lst in items_by_cat.items():
@@ -290,123 +290,165 @@ def has_additions() -> bool:
 # materials), so it is a genuine TSubclassOf<Decoration>. Product metadata
 # (price/name) falls back to the base Decoration defaults for now.
 # ---------------------------------------------------------------------------
-DECO_ROOT = "/Game/VideoStore/asset/prop/decoration"
-DECO_BASE = DECO_ROOT + "/Decoration"          # stub base (retargets at runtime)
+# EXEMPLARS: a real, in-game, LOADABLE catalogue item per type that we CLONE.
+# Deriving a new BP from a stub Decoration fails to load (the cooked class binds to
+# the game's real Decoration_C at runtime and mismatches the stub it was compiled
+# against). A clone of a real item instead INHERITS that item's correct link to the
+# real base class for free — so it loads. We only rename it (new unique identity) and
+# repoint its mesh, both as SAME-LENGTH byte edits (the one edit class proven 100%
+# reliable — no offsets shift, no package rewrite, no UAssetAPI shipped).
+#   self_path / class_token / mesh_path / mesh_name are the exact strings we swap.
+#   `asset` len sets the item-token length; `mesh_name` len sets the mesh-token length.
+MESH_ROOT = "/Game/VideoStore/asset/meshes"
+EXEMPLARS = {
+    "Decoration": {
+        "category": "Decoration",
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/decoration/Couch",
+        "asset": "Couch",
+        "self_path": "/Game/VideoStore/asset/prop/decoration/Couch/Couch",
+        "class_token": "Couch_C",
+        "mesh_path": "/Game/VideoStore/asset/meshes/LA_Chair_A_01",
+        "mesh_name": "LA_Chair_A_01",
+    },
+    # Shelves/Equipment: add their own exemplar (a real shelf / fridge) once the
+    # Decoration clone path is confirmed in-game; the machinery below is generic.
+}
 
-_COOK_SCRIPT = r'''
+# Import + cook a user FBX into a StaticMesh at a chosen /Game path. This half of the
+# old cooker always worked (it was the stub BP that failed) — reused verbatim.
+_MESH_COOK_SCRIPT = r'''
 import unreal, traceback
 LOG = r"%(log)s"
 def note(m):
-    try:
-        open(LOG, "a").write(str(m) + "\n"); unreal.log("PAKRAT " + str(m))
+    try: open(LOG, "a").write(str(m) + "\n")
     except Exception: pass
-
-FBX      = r"%(fbx)s"
-NAME     = "%(name)s"
-PKG      = "%(pkg)s"                       # /Game/VideoStore/asset/prop/decoration/<Name>
-MESH_PKG = PKG
-MESH_NM  = "SM_" + NAME
-DECO_BASE = "%(deco_base)s"
-at  = unreal.AssetToolsHelpers.get_asset_tools()
-eal = unreal.EditorAssetLibrary
+FBX = r"%(fbx)s"; PKG = "%(pkg)s"; NM = "%(name)s"
+at = unreal.AssetToolsHelpers.get_asset_tools()
 try:
-    # 1) stub Decoration base (Actor-derived); its /Game path is what matters —
-    #    runtime links the cooked BP's parent to the real game Decoration.
-    if not eal.does_asset_exist(DECO_BASE):
-        bf = unreal.BlueprintFactory(); bf.set_editor_property("parent_class", unreal.Actor)
-        at.create_asset("Decoration", "%(deco_root)s", unreal.Blueprint, bf)
-        eal.save_asset(DECO_BASE, only_if_is_dirty=False)
-    deco_gen = unreal.load_asset(DECO_BASE).generated_class()
-
-    # 2) import FBX -> StaticMesh
     opt = unreal.FbxImportUI()
     opt.import_mesh = True; opt.import_as_skeletal = False
-    opt.import_materials = False; opt.import_textures = False
+    opt.import_materials = True; opt.import_textures = True
     opt.mesh_type_to_import = unreal.FBXImportType.FBXIT_STATIC_MESH
     opt.static_mesh_import_data.combine_meshes = True
     task = unreal.AssetImportTask()
-    task.filename = FBX; task.destination_path = MESH_PKG; task.destination_name = MESH_NM
+    task.filename = FBX; task.destination_path = PKG; task.destination_name = NM
     task.replace_existing = True; task.automated = True; task.save = True; task.options = opt
     at.import_asset_tasks([task])
-    mesh = unreal.load_asset(MESH_PKG + "/" + MESH_NM)
-    note("MESH " + str(mesh is not None))
-
-    # 3) new Blueprint deriving from Decoration + a StaticMeshComponent root
-    bf2 = unreal.BlueprintFactory(); bf2.set_editor_property("parent_class", deco_gen)
-    bp = at.create_asset(NAME, PKG, unreal.Blueprint, bf2)
-    sds = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
-    roots = sds.k2_gather_subobject_data_for_blueprint(bp)
-    params = unreal.AddNewSubobjectParams(parent_handle=roots[0],
-             new_class=unreal.StaticMeshComponent, blueprint_context=bp)
-    handle, fail = sds.add_new_subobject(params)
-    if not fail:
-        data = sds.k2_find_subobject_data_from_handle(handle)
-        comp = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(data)
-        comp.set_editor_property("static_mesh", mesh)
-    unreal.EditorAssetLibrary.save_asset(PKG + "/" + NAME, only_if_is_dirty=False)
-    note("BP_DONE " + PKG + "/" + NAME + "." + NAME + "_C")
+    unreal.EditorAssetLibrary.save_asset(PKG + "/" + NM, only_if_is_dirty=False)
+    note("MESH_DONE " + PKG + "/" + NM)
 except Exception:
-    note("COOK_ERR\n" + traceback.format_exc())
+    note("MESH_ERR\n" + traceback.format_exc())
 '''
 
 
-def cook_decoration(env: "cook.CookEnv", fbx: str, name: str,
-                    progress=None) -> dict:
-    """Cook `fbx` into a Decoration BP `name`. Returns {pkg, cls, mount_dir}."""
-    name = "".join(c for c in name if c.isalnum() or c == "_") or "PakRatItem"
-    pkg = f"{DECO_ROOT}/{name}"
+def _slot_tokens(ex: dict, index: int) -> tuple[str, str]:
+    """Unique, valid-FName tokens of EXACTLY the exemplar's lengths (so every swap
+    is same-length). item token replaces the class/package name; mesh token the mesh.
+    """
+    nlen, mlen = len(ex["asset"]), len(ex["mesh_name"])
+    item = ("P" + format(index, "X").zfill(nlen - 1))[:nlen]
+    mesh = ("M" + format(index, "X").zfill(mlen - 1))[:mlen]
+    return item, mesh
+
+
+def _extract_exemplar(ex: dict, dest: Path) -> tuple[Path, Path]:
+    """repak-unpack the exemplar's .uasset/.uexp out of the user's own base pak."""
+    base = core.base_pak()
+    core._repak("unpack", "-f", "-o", str(dest),
+                "-i", f"{ex['pak_dir']}/{ex['asset']}.uasset",
+                "-i", f"{ex['pak_dir']}/{ex['asset']}.uexp",
+                str(base))
+    d = dest / Path(*ex["pak_dir"].split("/"))
+    return d / f"{ex['asset']}.uasset", d / f"{ex['asset']}.uexp"
+
+
+def _clone_exemplar(ex: dict, item: str, mesh: str,
+                    src_ua: Path, src_ux: Path, stage: Path) -> dict:
+    """Byte-clone the exemplar into a new unique class pointing at the user's mesh —
+    all SAME-LENGTH swaps. Stages <item>.uasset/.uexp. Returns {pkg_game, cls}."""
+    base = ex["self_path"].rsplit("/", 2)[0]            # .../decoration
+    new_self = f"{base}/{item}/{item}"
+    new_mesh_path = f"{ex['mesh_path'].rsplit('/', 1)[0]}/{mesh}"
+    subs = [
+        (ex["self_path"], new_self),                   # package identity
+        (ex["mesh_path"], new_mesh_path),              # mesh package ref
+        (ex["class_token"], f"{item}_C"),              # class + Default__ CDO
+        (ex["mesh_name"], mesh),                       # mesh object name
+    ]
+    ua = src_ua.read_bytes()
+    for a, b in subs:
+        if len(a) != len(b):
+            raise RuntimeError(f"clone token length mismatch: {a!r} != {b!r}")
+        ua = ua.replace(a.encode(), b.encode())
+    game_dir = new_self.rsplit("/", 1)[0]              # .../decoration/<item>
+    mount_dir = "RetroRewind/Content/" + game_dir[len("/Game/"):]
+    dest = stage / Path(*mount_dir.split("/"))
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / f"{item}.uasset").write_bytes(ua)
+    shutil.copyfile(src_ux, dest / f"{item}.uexp")
+    return {"pkg_game": new_self, "cls": f"{new_self}.{item}_C"}
+
+
+def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
+                    stage: Path, progress=None) -> int:
+    """Import+cook the user FBX to /Game/.../meshes/<mesh_token> and stage it.
+    Returns files staged (0 => cook produced nothing)."""
     log = cook.home() / "inject_cook.log"
     try:
         log.unlink()
     except Exception:
         pass
-    script = env_script_path()
-    script.write_text(_COOK_SCRIPT % {
-        "log": str(log), "fbx": fbx, "name": name, "pkg": pkg,
-        "deco_base": DECO_BASE, "deco_root": DECO_ROOT,
-    }, encoding="utf-8")
+    script = cook.project_dir() / "pakrat_mesh_import.py"
+    script.write_text(_MESH_COOK_SCRIPT % {
+        "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token},
+        encoding="utf-8")
     if progress:
-        progress(f"Importing + building Blueprint '{name}'…", None)
+        progress(f"Importing mesh '{mesh_token}'…", None)
     cook._ue(env, f"-ExecutePythonScript={script}")
     if progress:
-        progress("Cooking…", None)
-    cook._ue(env, "-run=cook", "-targetplatform=Windows", "-unversioned", "-cookall")
-    return {"pkg_game": pkg, "name": name,
-            "cls": f"{pkg}.{name}_C",
-            "mount_rel": pkg.replace("/Game/", "RetroRewind/Content/")}
-
-
-def env_script_path() -> Path:
-    return cook.project_dir() / "pakrat_deco_import.py"
-
-
-def _stage_cooked(name: str, mount_rel_dir: str, stage: Path) -> int:
-    """Copy the item's cooked assets into the stage tree at their real mount path.
-
-    The cooker's on-disk layout varies (platform subfolder, <Project>/Content mount
-    name), so — like cook.cook_meshes — we don't assume a fixed path: we locate the
-    cooked BP `<name>.uasset` anywhere under the cooked tree and stage its whole
-    containing folder (BP + its SM_<name> mesh + any .ubulk). Returns files staged.
-    """
+        progress("Cooking mesh…", None)
+    cook._ue(env, "-run=cook", "-targetplatform=Windows", "-unversioned",
+             "-cookall", "-nozenstore")
     cooked_root = cook.project_dir() / "Saved" / "Cooked"
-    matches = sorted(cooked_root.rglob(name + ".uasset")) if cooked_root.is_dir() else []
+    matches = sorted(cooked_root.rglob(mesh_token + ".uasset")) if cooked_root.is_dir() else []
     if not matches:
         return 0
-    src = matches[0].parent                       # the item's cooked folder
-    dest = stage / Path(*mount_rel_dir.split("/"))
+    src = matches[0]
+    mount = "RetroRewind/Content/" + MESH_ROOT[len("/Game/"):]
+    dest = stage / Path(*mount.split("/"))
     dest.mkdir(parents=True, exist_ok=True)
     n = 0
-    for f in src.iterdir():
+    for f in src.parent.glob(mesh_token + ".*"):
         if f.suffix in (".uasset", ".uexp", ".ubulk"):
             shutil.copy2(f, dest / f.name); n += 1
     return n
 
 
+def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
+                     category: str, index: int, stage: Path,
+                     progress=None) -> dict:
+    """Cook the user's mesh + clone the type's exemplar to point at it. Returns the
+    manifest entry {pkg, cls, name, category}."""
+    ex = EXEMPLARS.get(category) or EXEMPLARS["Decoration"]
+    item, mesh = _slot_tokens(ex, index)
+    if _cook_user_mesh(env, fbx, mesh, stage, progress=progress) == 0:
+        raise RuntimeError(
+            f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
+            "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="pakrat_ex_"))
+    src_ua, src_ux = _extract_exemplar(ex, tmp)
+    cloned = _clone_exemplar(ex, item, mesh, src_ua, src_ux, stage)
+    return {"pkg": cloned["pkg_game"], "cls": cloned["cls"],
+            "name": display_name, "category": ex["category"]}
+
+
 def run_add_pipeline(items: list[dict], progress=None) -> dict:
     """
     items: [{'fbx': path, 'name': str, 'category': 'Decoration'}, …]
-    Cooks each into a Decoration BP, packs them into ONE pak, (re)generates the
-    UE4SS injector mod + INI manifest (additive across runs). Returns
+    For each: cooks the user's mesh, then CLONES the type's exemplar catalogue item
+    to a new unique class pointing at that mesh. Packs all into ONE pak, (re)generates
+    the UE4SS injector mod + INI manifest (additive across runs). Returns
     {'pak': path, 'mod': dir, 'ini': path, 'items_by_cat': {...}}.
     """
     import tempfile
@@ -420,37 +462,34 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
                            "runtime catalogue hook.")
     env = cook.setup(progress=progress)
 
-    cooked = []
-    for it in items:
-        c = cook_decoration(env, it["fbx"], it["name"], progress=progress)
-        c["category"] = it.get("category", "Decoration")
-        cooked.append(c)
-
-    # Pack all cooked new assets into one pak.
-    say("Packaging .pak…", None)
     work = Path(tempfile.mkdtemp(prefix="pakrat_add_"))
     stage = work / "stage"
     stage.mkdir(parents=True, exist_ok=True)      # repak needs the dir to exist
-    staged = 0
-    for c in cooked:
-        staged += _stage_cooked(c["name"], c["mount_rel"], stage)
-    if staged == 0:
-        raise RuntimeError(
-            "Cook produced no assets to package — nothing was found under the "
-            "cooked output for: " + ", ".join(c["name"] for c in cooked) + ".\n"
-            "The UE cook step likely failed; see inject_cook.log and the cook logs "
-            "in the Pak Rat home folder.")
-    label = cooked[0]["name"] + (f"_plus{len(cooked)-1}" if len(cooked) > 1 else "")
+
+    # Global, ever-increasing slot index keeps every added class name unique.
+    existing = manifest_items()
+    base_index = sum(len(v) for v in existing.values())
+    built = []
+    for i, it in enumerate(items):
+        entry = build_added_item(
+            env, it["fbx"], it.get("name") or f"PakRatItem{i}",
+            it.get("category", "Decoration"), base_index + i, stage,
+            progress=progress)
+        built.append(entry)
+
+    say("Packaging .pak…", None)
+    label = ("".join(c for c in built[0]["name"] if c.isalnum()) or "Item") + \
+            (f"_plus{len(built) - 1}" if len(built) > 1 else "")
     out_pak = work / f"zzz_PakRat_Add_{label}_P.pak"
     core._repak("pack", "--version", core.PAK_VERSION, "--mount-point", core.PAK_MOUNT,
                 "--path-hash-seed", core.PAK_SEED, str(stage), str(out_pak))
 
     # Merge new items into the manifest (additive), then regenerate Lua+INI.
     say("Registering with UE4SS injector…", None)
-    items_by_cat = manifest_items()
-    for c in cooked:
-        items_by_cat.setdefault(c["category"], []).append(
-            {"pkg": c["pkg_game"], "cls": c["cls"], "name": c["name"]})
+    items_by_cat = existing
+    for e in built:
+        items_by_cat.setdefault(e["category"], []).append(
+            {"pkg": e["pkg"], "cls": e["cls"], "name": e["name"]})
     ini = save_manifest(items_by_cat)
     mod = write_injector_mod(items_by_cat)
     say("Done.", 100)

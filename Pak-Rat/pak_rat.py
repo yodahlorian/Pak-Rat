@@ -45,7 +45,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY = range(17)
 
-APP_VERSION = "3.0.0-beta5"
+APP_VERSION = "3.0.0-beta6"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -1208,8 +1208,10 @@ class AddInputPage(QWizardPage):
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Item name (letters/numbers, e.g. MyLamp)")
 
-        note = QLabel("Beta: metadata (price/name shown in-store) uses the game's "
-                      "default for now; the item spawns and is placeable.")
+        note = QLabel("Beta: your item is built by cloning a real catalogue item and "
+                      "swapping in your mesh, so it appears under that item's name / "
+                      "thumbnail / price for now — with YOUR model in-world. Custom "
+                      "name & price are coming.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#c08a2e; font-style:italic;")
 
