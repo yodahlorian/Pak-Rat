@@ -43,9 +43,9 @@ import inject  # noqa: E402  (v3 "Add Asset" runtime injection engine)
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
-    PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT = range(16)
+    PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY = range(17)
 
-APP_VERSION = "3.0.0-beta1"
+APP_VERSION = "3.0.0-beta2"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -1131,12 +1131,67 @@ class SetupPage(QWizardPage):
 
     def nextId(self):
         if getattr(self.wizard(), "mode", "") == "add":
-            return PAGE_ADDINPUT
+            return PAGE_ADDCATEGORY
         return PAGE_ASSET
 
 
 # ---------------------------------------------------------------------------
-# Add-asset input page (v3) — pick a model, name it, choose a category.
+# Add-asset step 1 (v3) — what kind of thing are you adding?
+# Only "mapped" content types (a known catalogue path) are selectable; the
+# rest are shown greyed-out as coming-soon placeholders.
+# ---------------------------------------------------------------------------
+class AddCategoryPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("What are you adding?")
+        self.setSubTitle("Pick the kind of item. Greyed-out types aren't mapped "
+                         "yet — they're coming in future updates.")
+        self.group = QButtonGroup(self)
+        lay = QVBoxLayout(self)
+        self._radios = []
+        first_mapped = None
+        for i, t in enumerate(inject.CONTENT_TYPES):
+            rb = QRadioButton(t["key"] + ("" if t["mapped"] else "   (coming soon)"))
+            rb.setEnabled(t["mapped"])
+            rb.setProperty("ctkey", t["key"])
+            self.group.addButton(rb, i)
+            lay.addWidget(rb)
+            self._radios.append(rb)
+            if t["mapped"] and first_mapped is None:
+                first_mapped = rb
+        if first_mapped:
+            first_mapped.setChecked(True)
+        lay.addStretch(1)
+        note = QLabel("More types (Shelves, Equipment, Snacks, Drinks, Toys) unlock "
+                      "as their catalogue paths are added.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888;")
+        lay.addWidget(note)
+        self.group.buttonToggled.connect(lambda *_: self.completeChanged.emit())
+
+    def _selected(self):
+        b = self.group.checkedButton()
+        return b.property("ctkey") if b else None
+
+    def isComplete(self):
+        key = self._selected()
+        t = inject.content_type(key) if key else None
+        return bool(t and t["mapped"])
+
+    def validatePage(self):
+        t = inject.content_type(self._selected())
+        if not t or not t["mapped"]:
+            return False
+        self.wizard().add_type = t["key"]
+        self.wizard().add_category = t["category"]
+        return True
+
+    def nextId(self):
+        return PAGE_ADDINPUT
+
+
+# ---------------------------------------------------------------------------
+# Add-asset step 2 (v3) — pick a model, name it. (Category chosen on step 1.)
 # ---------------------------------------------------------------------------
 class AddInputPage(QWizardPage):
     def __init__(self):
@@ -1151,9 +1206,6 @@ class AddInputPage(QWizardPage):
         self.pick_lbl.setStyleSheet("color:#888;")
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Item name (letters/numbers, e.g. MyLamp)")
-        self.cat_combo = QComboBox()
-        for key in inject.CATEGORIES:
-            self.cat_combo.addItem(inject.CATEGORY_LABELS.get(key, key), key)
 
         note = QLabel("Beta: metadata (price/name shown in-store) uses the game's "
                       "default for now; the item spawns and is placeable.")
@@ -1166,14 +1218,16 @@ class AddInputPage(QWizardPage):
         lay.addSpacing(10)
         lay.addWidget(QLabel("Name"))
         lay.addWidget(self.name_edit)
-        lay.addSpacing(10)
-        lay.addWidget(QLabel("Catalogue category"))
-        lay.addWidget(self.cat_combo)
         lay.addStretch(1)
         lay.addWidget(note)
 
         self.pick_btn.clicked.connect(self._pick)
         self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
+
+    def initializePage(self):
+        t = getattr(self.wizard(), "add_type", "Decoration")
+        self.setSubTitle(f"Adding a new {t}. Bring your own model — Pak Rat cooks it "
+                         "into a brand-new catalogue item and registers it with UE4SS.")
 
     def _pick(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1195,7 +1249,7 @@ class AddInputPage(QWizardPage):
         w.add_items = [{
             "fbx": self._fbx,
             "name": "".join(c for c in self.name_edit.text() if c.isalnum() or c == "_"),
-            "category": self.cat_combo.currentData(),
+            "category": getattr(self.wizard(), "add_category", "Decoration"),
         }]
         return True
 
@@ -2415,6 +2469,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_EXTRACTDONE, ExtractDonePage())
         self.setPage(PAGE_COMBINESRC, CombineSourcePage())
         self.setPage(PAGE_COMBINESEL, CombineSelectPage())
+        self.setPage(PAGE_ADDCATEGORY, AddCategoryPage())
         self.setPage(PAGE_ADDINPUT, AddInputPage())
         self.setStartId(PAGE_MODE)
 

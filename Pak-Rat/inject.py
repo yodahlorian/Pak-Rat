@@ -43,6 +43,30 @@ WIDGET_CLASS = ("/Game/VideoStore/asset/prop/catalogue/"
 
 MOD_NAME = "PakRatInjector"
 
+# Content types shown on the v3 "what are you adding?" step. Each maps to a
+# catalogue product-class function (`category`). Only types with mapped=True are
+# selectable in the GUI; the rest are placeholders until their catalogue path is
+# reverse-engineered and proven. Order = display order.
+CONTENT_TYPES = [
+    {"key": "Shelves",    "category": "Container",   "mapped": False},
+    {"key": "Decoration", "category": "Decoration",  "mapped": True},
+    {"key": "Equipment",  "category": "Equipmement", "mapped": False},
+    {"key": "Snacks",     "category": None,          "mapped": False},
+    {"key": "Drinks",     "category": None,          "mapped": False},
+    {"key": "Toys",       "category": None,          "mapped": False},
+]
+
+
+def mapped_content_types() -> list[dict]:
+    return [t for t in CONTENT_TYPES if t["mapped"]]
+
+
+def content_type(key: str) -> dict | None:
+    for t in CONTENT_TYPES:
+        if t["key"] == key:
+            return t
+    return None
+
 
 # ---------------------------------------------------------------------------
 # UE4SS discovery (mirrors cook.ue_available for the GUI gate)
