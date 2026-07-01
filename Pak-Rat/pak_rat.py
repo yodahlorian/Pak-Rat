@@ -45,7 +45,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY = range(17)
 
-APP_VERSION = "3.0.0-beta4"
+APP_VERSION = "3.0.0-beta5"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -1162,8 +1162,9 @@ class AddCategoryPage(QWizardPage):
         if first_mapped:
             first_mapped.setChecked(True)
         lay.addStretch(1)
-        note = QLabel("More types (Shelves, Equipment, Snacks, Drinks, Toys) unlock "
-                      "as their catalogue paths are added.")
+        note = QLabel("Snacks, Drinks and Toys aren't catalogue items — they're "
+                      "stocked from machines/boxes, a different system that's still "
+                      "being mapped. They'll unlock in a future update.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;")
         lay.addWidget(note)

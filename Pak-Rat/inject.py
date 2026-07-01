@@ -47,10 +47,16 @@ MOD_NAME = "PakRatInjector"
 # catalogue product-class function (`category`). Only types with mapped=True are
 # selectable in the GUI; the rest are placeholders until their catalogue path is
 # reverse-engineered and proven. Order = display order.
+# Shelves(Container) + Equipment(Equipmement) use the SAME proven catalogue hook
+# as Decoration — `Return Catalogue <category> product class` on UI_Catalogue_Widget,
+# which the generated Lua already generalizes over. The cook yields a Decoration-
+# derived BP; `category` just routes which catalogue tab it's appended to.
+# Snacks/Drinks/Toys have NO hookable function (their product list is a static data
+# array on a stock-box CDO — ToysBox/DrinkBox/ConcessionsShelf), so they stay gated.
 CONTENT_TYPES = [
-    {"key": "Shelves",    "category": "Container",   "mapped": False},
+    {"key": "Shelves",    "category": "Container",   "mapped": True},
     {"key": "Decoration", "category": "Decoration",  "mapped": True},
-    {"key": "Equipment",  "category": "Equipmement", "mapped": False},
+    {"key": "Equipment",  "category": "Equipmement", "mapped": True},
     {"key": "Snacks",     "category": None,          "mapped": False},
     {"key": "Drinks",     "category": None,          "mapped": False},
     {"key": "Toys",       "category": None,          "mapped": False},
@@ -253,7 +259,7 @@ def manifest_items() -> dict[str, list[dict]]:
 def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
     cp = configparser.ConfigParser()
     cp["pakrat"] = {
-        "version": "3.0.0-beta4",
+        "version": "3.0.0-beta5",
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     for cat, lst in items_by_cat.items():
