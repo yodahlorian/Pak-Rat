@@ -253,7 +253,7 @@ def manifest_items() -> dict[str, list[dict]]:
 def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
     cp = configparser.ConfigParser()
     cp["pakrat"] = {
-        "version": "3.0.0-beta3",
+        "version": "3.0.0-beta4",
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     for cat, lst in items_by_cat.items():
@@ -374,17 +374,25 @@ def env_script_path() -> Path:
     return cook.project_dir() / "pakrat_deco_import.py"
 
 
-def _stage_cooked(mount_rel_dir: str, stage: Path) -> int:
-    """Copy every cooked file under a /Game dir into the stage tree. Returns count."""
-    cooked_root = cook._cooked_dir()          # .../Saved/Cooked/Windows/RetroRewind/Content
-    src = cooked_root / Path(*mount_rel_dir.replace("RetroRewind/Content/", "").split("/"))
+def _stage_cooked(name: str, mount_rel_dir: str, stage: Path) -> int:
+    """Copy the item's cooked assets into the stage tree at their real mount path.
+
+    The cooker's on-disk layout varies (platform subfolder, <Project>/Content mount
+    name), so — like cook.cook_meshes — we don't assume a fixed path: we locate the
+    cooked BP `<name>.uasset` anywhere under the cooked tree and stage its whole
+    containing folder (BP + its SM_<name> mesh + any .ubulk). Returns files staged.
+    """
+    cooked_root = cook.project_dir() / "Saved" / "Cooked"
+    matches = sorted(cooked_root.rglob(name + ".uasset")) if cooked_root.is_dir() else []
+    if not matches:
+        return 0
+    src = matches[0].parent                       # the item's cooked folder
+    dest = stage / Path(*mount_rel_dir.split("/"))
+    dest.mkdir(parents=True, exist_ok=True)
     n = 0
-    if src.is_dir():
-        dest = stage / Path(*mount_rel_dir.split("/"))
-        dest.mkdir(parents=True, exist_ok=True)
-        for f in src.iterdir():
-            if f.suffix in (".uasset", ".uexp", ".ubulk"):
-                shutil.copy2(f, dest / f.name); n += 1
+    for f in src.iterdir():
+        if f.suffix in (".uasset", ".uexp", ".ubulk"):
+            shutil.copy2(f, dest / f.name); n += 1
     return n
 
 
@@ -416,8 +424,16 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
     say("Packaging .pak…", None)
     work = Path(tempfile.mkdtemp(prefix="pakrat_add_"))
     stage = work / "stage"
+    stage.mkdir(parents=True, exist_ok=True)      # repak needs the dir to exist
+    staged = 0
     for c in cooked:
-        _stage_cooked(c["mount_rel"], stage)
+        staged += _stage_cooked(c["name"], c["mount_rel"], stage)
+    if staged == 0:
+        raise RuntimeError(
+            "Cook produced no assets to package — nothing was found under the "
+            "cooked output for: " + ", ".join(c["name"] for c in cooked) + ".\n"
+            "The UE cook step likely failed; see inject_cook.log and the cook logs "
+            "in the Pak Rat home folder.")
     label = cooked[0]["name"] + (f"_plus{len(cooked)-1}" if len(cooked) > 1 else "")
     out_pak = work / f"zzz_PakRat_Add_{label}_P.pak"
     core._repak("pack", "--version", core.PAK_VERSION, "--mount-point", core.PAK_MOUNT,
