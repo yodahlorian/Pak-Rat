@@ -45,7 +45,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY = range(17)
 
-APP_VERSION = "3.0.0-beta2"
+APP_VERSION = "3.0.0-beta3"
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -1773,6 +1773,7 @@ class PipelineWorker(QThread):
         self.combine_selected = combine_selected or []
         self.cook_tex_items = cook_tex_items or {}
         self.add_items = add_items or []
+        self.add_meta = None   # {mod, ini} for add mode — bundled on deploy/finish
 
     def run(self):
         try:
@@ -1787,6 +1788,7 @@ class PipelineWorker(QThread):
                     self.add_items,
                     progress=lambda m, p=None: self.status.emit(m))
                 pak = result["pak"]
+                self.add_meta = {"mod": result["mod"], "ini": result["ini"]}
             elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
@@ -1845,6 +1847,8 @@ class ProcessPage(QWizardPage):
 
     def on_done(self, pak_path):
         self.wizard().pak_path = pak_path
+        # None for non-add runs — also resets any stale meta from a prior run.
+        self.wizard().add_meta = getattr(self.worker, "add_meta", None)
         self._done = True
         self.completeChanged.emit()
         self.wizard().next()  # auto-advance to finish
@@ -2517,11 +2521,33 @@ class PakRatWizard(QWizard):
         try:
             final_pak = core.rename_pak(self.pak_path, name)
             self.pak_path = final_pak
+            add_meta = getattr(self, "add_meta", None)
+            is_add = bool(add_meta and add_meta.get("mod"))
             if page.rb_deploy.isChecked():
                 dest = core.deploy_to_rr(final_pak)
+                if is_add:
+                    # The injector mod is already live in this machine's ue4ss
+                    # (written during the build). Also emit a shareable bundle so
+                    # the mod can be handed to other users, pak + injector together.
+                    bundle = core.bundle_add_to_documents(final_pak, add_meta["mod"])
+                    QMessageBox.information(
+                        self, "Pak Rat",
+                        f"Installed to Retro Rewind ~mods:\n{Path(dest).name}\n\n"
+                        "The UE4SS injector is installed in this game's "
+                        "ue4ss/Mods.\nShareable bundle (pak + injector) for other "
+                        f"users:\n{bundle}")
+                else:
+                    QMessageBox.information(
+                        self, "Pak Rat",
+                        f"Installed to Retro Rewind ~mods:\n{Path(dest).name}")
+            elif is_add:
+                # Finish/share: bundle BOTH parts so other users get the injector,
+                # not just the pak (the pak alone won't register the item).
+                bundle = core.bundle_add_to_documents(final_pak, add_meta["mod"])
                 QMessageBox.information(
                     self, "Pak Rat",
-                    f"Installed to Retro Rewind ~mods:\n{Path(dest).name}")
+                    "Saved a shareable bundle (pak + UE4SS injector) to:\n"
+                    f"{bundle}")
             else:
                 core.finish_to_documents(final_pak)
         except Exception as e:  # surface; keep open so the user can retry

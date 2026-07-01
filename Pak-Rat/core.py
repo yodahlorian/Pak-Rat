@@ -1217,6 +1217,45 @@ def finish_to_documents(pak_path: str) -> str:
     return str(dest)
 
 
+def bundle_add_to_documents(pak_path: str, mod_dir: str) -> str:
+    """v3 Add-Asset mode: write a self-contained, shareable folder to Documents
+    holding BOTH the .pak and the UE4SS injector mod, so it installs correctly
+    for OTHER users. The pak alone does nothing — the UE4SS injector is what
+    registers the new catalogue item at runtime, so both must travel together.
+    Returns the bundle folder path and reveals it in the file explorer.
+    """
+    docs = Path(os.path.expanduser("~")) / "Documents"
+    bundle = docs / f"PakRat_{Path(pak_path).stem}"
+    if bundle.exists():
+        shutil.rmtree(bundle, ignore_errors=True)
+
+    mods_dst = bundle / "Content" / "Paks" / "~mods"
+    mods_dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pak_path, mods_dst / Path(pak_path).name)
+
+    mod = Path(mod_dir)
+    ue4ss_dst = bundle / "Binaries" / "Win64" / "ue4ss" / "Mods"
+    ue4ss_dst.mkdir(parents=True, exist_ok=True)
+    if mod.is_dir():
+        shutil.copytree(mod, ue4ss_dst / mod.name, dirs_exist_ok=True)
+
+    (bundle / "INSTALL.txt").write_text(
+        "Pak Rat — Add-Asset mod (two parts, both required)\n"
+        "==================================================\n\n"
+        "This adds a NEW catalogue item. It needs a .pak AND a UE4SS injector\n"
+        "mod (the injector registers the item in-game at runtime).\n\n"
+        "Into your Retro Rewind install, copy the folders in this bundle so that:\n\n"
+        f"  Content\\Paks\\~mods\\{Path(pak_path).name}\n"
+        "      -> RetroRewind\\RetroRewind\\Content\\Paks\\~mods\\\n\n"
+        f"  Binaries\\Win64\\ue4ss\\Mods\\{mod.name}\\\n"
+        "      -> RetroRewind\\RetroRewind\\Binaries\\Win64\\ue4ss\\Mods\\\n\n"
+        "RE-UE4SS must be installed for the injector to load.\n",
+        encoding="utf-8")
+
+    reveal_in_explorer(bundle)
+    return str(bundle)
+
+
 def reveal_in_explorer(path: str | Path) -> None:
     """Open the OS file explorer with `path` selected (Windows-first)."""
     path = str(path)

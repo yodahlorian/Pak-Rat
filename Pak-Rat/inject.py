@@ -253,7 +253,7 @@ def manifest_items() -> dict[str, list[dict]]:
 def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
     cp = configparser.ConfigParser()
     cp["pakrat"] = {
-        "version": "3.0.0-beta1",
+        "version": "3.0.0-beta3",
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     for cat, lst in items_by_cat.items():
@@ -323,7 +323,7 @@ try:
     task.replace_existing = True; task.automated = True; task.save = True; task.options = opt
     at.import_asset_tasks([task])
     mesh = unreal.load_asset(MESH_PKG + "/" + MESH_NM)
-    note("MESH %s" % (mesh is not None))
+    note("MESH " + str(mesh is not None))
 
     # 3) new Blueprint deriving from Decoration + a StaticMeshComponent root
     bf2 = unreal.BlueprintFactory(); bf2.set_editor_property("parent_class", deco_gen)
@@ -338,7 +338,7 @@ try:
         comp = unreal.SubobjectDataBlueprintFunctionLibrary.get_object(data)
         comp.set_editor_property("static_mesh", mesh)
     unreal.EditorAssetLibrary.save_asset(PKG + "/" + NAME, only_if_is_dirty=False)
-    note("BP_DONE %s" % (PKG + "/" + NAME + "." + NAME + "_C"))
+    note("BP_DONE " + PKG + "/" + NAME + "." + NAME + "_C")
 except Exception:
     note("COOK_ERR\n" + traceback.format_exc())
 '''
