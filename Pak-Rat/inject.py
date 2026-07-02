@@ -341,6 +341,47 @@ except Exception:
 '''
 
 
+# ---------------------------------------------------------------------------
+# relink.exe — the C# UAssetAPI tool. `clone` re-serialises an exemplar to a NEW
+# package identity (+ optional mesh swap); the default (no-cmd) form inserts a
+# class into the catalogue widget's product-class bytecode with the correct +9B
+# cooked relink. Replaces the old byte-.replace clone AND the whole UE4SS/Lua path.
+# ---------------------------------------------------------------------------
+RELINK = lambda: core.VENDOR("relink.exe")                    # noqa: E731
+USMAP = lambda: core.VENDOR("RetroRewindMappings.usmap")      # noqa: E731
+
+WIDGET_PAK_DIR = "RetroRewind/Content/VideoStore/asset/prop/catalogue"
+WIDGET_ASSET = "UI_Catalogue_Widget"
+
+# category -> (widget product-class fn, sibling class already in that array).
+# All added items currently register on the Decorations tab (proven path): the
+# clone is Decoration-derived and Couch_C is its in-array sibling.
+CAT_WIDGET = {
+    "Decoration":  ("Return Catalogue Decoration product class", "Couch_C"),
+    "Container":   ("Return Catalogue Decoration product class", "Couch_C"),
+    "Equipmement": ("Return Catalogue Decoration product class", "Couch_C"),
+    "Station":     ("Return Catalogue Decoration product class", "Couch_C"),
+}
+
+
+def _relink(*args) -> None:
+    """Invoke the vendored relink.exe; raise on non-zero exit."""
+    r = core._run([str(RELINK()), *[str(a) for a in args]])
+    if r.returncode != 0:
+        raise RuntimeError(f"relink '{args[0] if args else ''}' failed: "
+                           f"{r.stderr or r.stdout}")
+
+
+def _extract_widget(dest: Path) -> tuple[Path, Path]:
+    """repak-unpack the vanilla catalogue widget out of the base pak."""
+    core._repak("unpack", "-f", "-o", str(dest),
+                "-i", f"{WIDGET_PAK_DIR}/{WIDGET_ASSET}.uasset",
+                "-i", f"{WIDGET_PAK_DIR}/{WIDGET_ASSET}.uexp",
+                str(core.base_pak()))
+    d = dest / Path(*WIDGET_PAK_DIR.split("/"))
+    return d / f"{WIDGET_ASSET}.uasset", d / f"{WIDGET_ASSET}.uexp"
+
+
 def _slot_tokens(ex: dict, index: int) -> tuple[str, str]:
     """Unique, valid-FName tokens of EXACTLY the exemplar's lengths (so every swap
     is same-length). item token replaces the class/package name; mesh token the mesh.
@@ -364,28 +405,25 @@ def _extract_exemplar(ex: dict, dest: Path) -> tuple[Path, Path]:
 
 def _clone_exemplar(ex: dict, item: str, mesh: str,
                     src_ua: Path, src_ux: Path, stage: Path) -> dict:
-    """Byte-clone the exemplar into a new unique class pointing at the user's mesh —
-    all SAME-LENGTH swaps. Stages <item>.uasset/.uexp. Returns {pkg_game, cls}."""
+    """RE-SERIALISE the exemplar into a NEW package identity (fresh PackageGuid +
+    PackageSource + FolderName) pointing at the user's cooked mesh, via relink.exe
+    `clone` (any-length exact renames). Stages <item>.uasset/.uexp under the pak
+    tree. Returns {pkg_game, cls}."""
     base = ex["self_path"].rsplit("/", 2)[0]            # .../decoration
     new_self = f"{base}/{item}/{item}"
     new_mesh_path = f"{ex['mesh_path'].rsplit('/', 1)[0]}/{mesh}"
-    subs = [
-        (ex["self_path"], new_self),                   # package identity
-        (ex["mesh_path"], new_mesh_path),              # mesh package ref
-        (ex["class_token"], f"{item}_C"),              # class + Default__ CDO
-        (ex["mesh_name"], mesh),                       # mesh object name
-    ]
-    ua = src_ua.read_bytes()
-    for a, b in subs:
-        if len(a) != len(b):
-            raise RuntimeError(f"clone token length mismatch: {a!r} != {b!r}")
-        ua = ua.replace(a.encode(), b.encode())
     game_dir = new_self.rsplit("/", 1)[0]              # .../decoration/<item>
     mount_dir = "RetroRewind/Content/" + game_dir[len("/Game/"):]
     dest = stage / Path(*mount_dir.split("/"))
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / f"{item}.uasset").write_bytes(ua)
-    shutil.copyfile(src_ux, dest / f"{item}.uexp")
+    out_ua = dest / f"{item}.uasset"
+    # clone <ex> <usmap> <out> <oldSelf> <newSelf> <oldCls> <newCls> [old new ...]
+    # trailing pairs: mesh package ref + mesh object name -> the user's cooked mesh.
+    _relink("clone", src_ua, USMAP(), out_ua,
+            ex["self_path"], new_self,
+            ex["class_token"], f"{item}_C",
+            ex["mesh_path"], new_mesh_path,
+            ex["mesh_name"], mesh)
     return {"pkg_game": new_self, "cls": f"{new_self}.{item}_C"}
 
 
@@ -446,10 +484,13 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
 def run_add_pipeline(items: list[dict], progress=None) -> dict:
     """
     items: [{'fbx': path, 'name': str, 'category': 'Decoration'}, …]
-    For each: cooks the user's mesh, then CLONES the type's exemplar catalogue item
-    to a new unique class pointing at that mesh. Packs all into ONE pak, (re)generates
-    the UE4SS injector mod + INI manifest (additive across runs). Returns
-    {'pak': path, 'mod': dir, 'ini': path, 'items_by_cat': {...}}.
+    Per item: cook the user's mesh, then RE-SERIALISE a fresh-identity clone of the
+    type's exemplar pointing at that mesh. Then extract the vanilla catalogue widget
+    and CHAIN-insert every manifest item's class into its product-class bytecode —
+    NATIVE registration, NO UE4SS/Lua. Packs the widget + all clones + meshes into ONE
+    V8B pak (path-string index, so brand-new package paths are discoverable). Manifest
+    is additive across runs (it drives the widget insert). Returns
+    {'pak': path, 'ini': path, 'items_by_cat': {...}}.
     """
     import tempfile
 
@@ -457,10 +498,7 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
         if progress:
             progress(m, p)
 
-    if not ue4ss_available():
-        raise RuntimeError("UE4SS is not installed — Add Asset needs it for the "
-                           "runtime catalogue hook.")
-    env = cook.setup(progress=progress)
+    env = cook.setup(progress=progress)   # UE cooker (for the user's mesh)
 
     work = Path(tempfile.mkdtemp(prefix="pakrat_add_"))
     stage = work / "stage"
@@ -477,21 +515,39 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
             progress=progress)
         built.append(entry)
 
-    say("Packaging .pak…", None)
-    label = ("".join(c for c in built[0]["name"] if c.isalnum()) or "Item") + \
-            (f"_plus{len(built) - 1}" if len(built) > 1 else "")
-    out_pak = work / f"zzz_PakRat_Add_{label}_P.pak"
-    core._repak("pack", "--version", core.PAK_VERSION, "--mount-point", core.PAK_MOUNT,
-                "--path-hash-seed", core.PAK_SEED, str(stage), str(out_pak))
-
-    # Merge new items into the manifest (additive), then regenerate Lua+INI.
-    say("Registering with UE4SS injector…", None)
+    # Merge new items into the manifest (additive) — it drives the widget insert.
     items_by_cat = existing
     for e in built:
         items_by_cat.setdefault(e["category"], []).append(
             {"pkg": e["pkg"], "cls": e["cls"], "name": e["name"]})
+
+    # Register EVERY manifest item natively into the catalogue widget: start from a
+    # fresh vanilla widget, chain one insert per item (each output feeds the next).
+    say("Registering into the catalogue widget…", None)
+    wtmp = Path(tempfile.mkdtemp(prefix="pakrat_wid_"))
+    cur_ua, _ = _extract_widget(wtmp)
+    n = 0
+    for cat, lst in items_by_cat.items():
+        fn, sib = CAT_WIDGET.get(cat, CAT_WIDGET["Decoration"])
+        for it in lst:
+            out_ua = wtmp / f"widget_{n}.uasset"
+            _relink(cur_ua, USMAP(), out_ua, it["pkg"], it["cls"], sib, fn)
+            cur_ua = out_ua
+            n += 1
+    wdest = stage / Path(*WIDGET_PAK_DIR.split("/"))
+    wdest.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(cur_ua, wdest / f"{WIDGET_ASSET}.uasset")
+    shutil.copyfile(cur_ua.with_suffix(".uexp"), wdest / f"{WIDGET_ASSET}.uexp")
+
+    # Pack V8B (FNameBasedCompression, NO path-hash seed): required so genuinely NEW
+    # package paths are discoverable by the loader (V11's path-hash index is not).
+    say("Packaging .pak (V8B)…", None)
+    label = ("".join(c for c in built[0]["name"] if c.isalnum()) or "Item") + \
+            (f"_plus{len(built) - 1}" if len(built) > 1 else "")
+    out_pak = work / f"zzz_PakRat_Add_{label}_P.pak"
+    core._repak("pack", "--version", core.MESH_PAK_VERSION, "--mount-point",
+                core.PAK_MOUNT, str(stage), str(out_pak))
+
     ini = save_manifest(items_by_cat)
-    mod = write_injector_mod(items_by_cat)
     say("Done.", 100)
-    return {"pak": str(out_pak), "mod": str(mod), "ini": str(ini),
-            "items_by_cat": items_by_cat}
+    return {"pak": str(out_pak), "ini": str(ini), "items_by_cat": items_by_cat}

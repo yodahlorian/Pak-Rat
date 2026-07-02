@@ -474,6 +474,13 @@ class ModePage(QWizardPage):
         self.group.addButton(self.rb_combine, 4)
 
         lay = QVBoxLayout(self)
+        lay.addWidget(self.rb_extract)
+        lab3 = QLabel("    Pull an original mesh or texture out of the game to edit "
+                      "(textures as PNG/DDS, meshes as .uasset). Siblings auto-included.")
+        lab3.setStyleSheet("color:#888;")
+        lab3.setWordWrap(True)
+        lay.addWidget(lab3)
+        lay.addSpacing(12)
         lay.addWidget(self.rb_regular)
         lab1 = QLabel("    Swap a single texture (PNG/DDS) on an existing asset.")
         lab1.setStyleSheet("color:#888;")
@@ -493,13 +500,6 @@ class ModePage(QWizardPage):
         self.add_lab.setStyleSheet("color:#888;")
         self.add_lab.setWordWrap(True)
         lay.addWidget(self.add_lab)
-        lay.addSpacing(12)
-        lay.addWidget(self.rb_extract)
-        lab3 = QLabel("    Pull an original mesh or texture out of the game to edit "
-                      "(textures as PNG/DDS, meshes as .uasset). Siblings auto-included.")
-        lab3.setStyleSheet("color:#888;")
-        lab3.setWordWrap(True)
-        lay.addWidget(lab3)
         lay.addSpacing(12)
         lay.addWidget(self.rb_combine)
         lab4 = QLabel("    Cherry-pick assets from mods you already have and merge "
@@ -813,7 +813,7 @@ class TextureListPage(QWizardPage):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._container)
 
-        self.add_btn = QPushButton("➕  Add another texture…")
+        self.add_btn = QPushButton("➕  Swap another asset's texture…")
         self.add_btn.clicked.connect(self._add_another)
         self.hint = QLabel("Each image is resized to its target's exact size "
                            "automatically. Fill at least one.")
@@ -1791,7 +1791,9 @@ class PipelineWorker(QThread):
                     self.add_items,
                     progress=lambda m, p=None: self.status.emit(m))
                 pak = result["pak"]
-                self.add_meta = {"mod": result["mod"], "ini": result["ini"]}
+                # Native pak (widget-insert registration) — self-contained, no
+                # UE4SS mod to bundle; deploys/shares like any ordinary pak.
+                self.add_meta = {"ini": result["ini"]}
             elif self.mode == "mesh":
                 pak = core.run_mesh_pipeline(self.mesh_plan, self.mesh_user_files,
                                              progress=self.status.emit)
