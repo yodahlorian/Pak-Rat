@@ -347,7 +347,7 @@ except Exception:
 # class into the catalogue widget's product-class bytecode with the correct +9B
 # cooked relink. Replaces the old byte-.replace clone AND the whole UE4SS/Lua path.
 # ---------------------------------------------------------------------------
-RELINK = lambda: core.VENDOR("relink.exe")                    # noqa: E731
+RELINK = lambda: core.VENDOR("relink", "relink.exe")          # noqa: E731 (onedir: no single-file bootloader -> no AV false-positive)
 USMAP = lambda: core.VENDOR("RetroRewindMappings.usmap")      # noqa: E731
 
 WIDGET_PAK_DIR = "RetroRewind/Content/VideoStore/asset/prop/catalogue"

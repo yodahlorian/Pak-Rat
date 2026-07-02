@@ -19,6 +19,13 @@
 # fetched on the user's own machine at first run; see core.ensure_oodle().
 oo2core_*.dll
 
+# ── relink.exe (C# UAssetAPI tool): built from tools/relink via `dotnet publish
+#    -c Release -r win-x64 --self-contained` (onedir, NOT single-file — the
+#    single-file bootloader trips AV). Source IS committed; the built runtime is
+#    bundled at PyInstaller time, not committed (80MB of .NET runtime). ─────────
+Pak-Rat/vendor/relink/
+Pak-Rat/vendor/relink.exe
+
 # ── Bulky generated data we don't ship in source ────────────────────────
 Pak-Rat/data/assets.txt
 Pak-Rat/data/textures_clean.txt
