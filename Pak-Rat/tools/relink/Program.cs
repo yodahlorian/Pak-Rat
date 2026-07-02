@@ -272,8 +272,59 @@ class P {
         asset.Write(outW);
         Console.WriteLine("noop-write done");
     }
+    static void CdoDump(string inU, string usmapP, string cdoName) {
+        var asset = new UAsset(inU, EngineVersion.VER_UE5_4, new Usmap(usmapP));
+        var e = asset.Exports.First(x => x.ObjectName.ToString()==cdoName);
+        Console.WriteLine($"CDO {cdoName}: {e.GetType().Name}");
+        var names = asset.GetNameMapIndexList();
+        for (int i=0;i<names.Count;i++){ var s=names[i].Value; if(s.Contains("Interface")||s.Contains("Price")||s.Contains("Product")||s.Contains("_Title")) Console.WriteLine($"  namemap[{i}]={s}"); }
+        if (e is NormalExport ne) {
+            Console.WriteLine($"  NormalExport, {ne.Data.Count} props:");
+            foreach (var p in ne.Data) {
+                var nm = p.GetType().GetProperty("Name")?.GetValue(p);
+                Console.WriteLine($"    {nm} : {p.GetType().Name} = {p}");
+            }
+        } else Console.WriteLine("  (RawExport -> byte-patch)");
+    }
+    // setcdo: rewrite the item CDO's inline title-key FString to a NEW localization key.
+    // The CDO is a RawExport (opaque blob) referencing the Interface StringTable by name-map
+    // path + this inline key. Any-length rewrite; UAssetAPI recomputes SerialSize/offsets.
+    static void SetCdo(string inU, string usmapP, string outU, string cdoName, string newKey) {
+        var asset = new UAsset(inU, EngineVersion.VER_UE5_4, new Usmap(usmapP));
+        var e = (RawExport)asset.Exports.First(x => x.ObjectName.ToString()==cdoName);
+        byte[] d = e.Data;
+        int off=-1, oldn=0; string olds=null;
+        for (int i=0;i+4<d.Length;i++){
+            int n=BitConverter.ToInt32(d,i);
+            if (n>4 && n<200 && i+4+n<=d.Length && d[i+4+n-1]==0){
+                var s=System.Text.Encoding.ASCII.GetString(d,i+4,n-1);
+                if (s.StartsWith("Interface_") && (s.Contains("Product")||s.Contains("_Title")||s.Contains("ModKit"))){ off=i; oldn=n; olds=s; break; }
+            }
+        }
+        if (off<0){ Console.WriteLine("ERR: title-key not found in CDO"); return; }
+        var kb=System.Text.Encoding.ASCII.GetBytes(newKey); int nn=kb.Length+1;
+        var nd=new List<byte>(); nd.AddRange(d.Take(off));
+        nd.AddRange(BitConverter.GetBytes(nn)); nd.AddRange(kb); nd.Add(0);
+        nd.AddRange(d.Skip(off+4+oldn));
+        e.Data=nd.ToArray();
+        asset.Write(outU);
+        Console.WriteLine($"setcdo: '{olds}' -> '{newKey}'  blob {d.Length}->{e.Data.Length}. WROTE {outU}");
+    }
+
+    // staddkey: append a [key][value] FString pair to the Interface StringTable RawExport blob
+    // (entry count is an int32 @0x18; pairs are inserted before the 5-byte tail). Chainable.
+    static void StAddKey(string inU, string usmapP, string outU, string key, string val) {
+        var asset = new UAsset(inU, EngineVersion.VER_UE5_4, new Usmap(usmapP));
+        var e = (StringTableExport)asset.Exports.First(x => x is StringTableExport);
+        int before = e.Table.Count;
+        e.Table[new FString(key)] = new FString(val);   // parsed map -> clean add/update
+        asset.Write(outU);
+        Console.WriteLine($"staddkey: '{key}' -> '{val}'  entries {before}->{e.Table.Count}. WROTE {outU}");
+    }
     static void Main(string[] a) {
         if (a[0]=="cmp") Cmp(a[1],a[2],a[3],a[4]);
+        else if (a[0]=="setcdo") SetCdo(a[1],a[2],a[3],a[4],a[5]);
+        else if (a[0]=="staddkey") StAddKey(a[1],a[2],a[3],a[4],a[5]);
         else if (a[0]=="verify") Verify(a[1],a[2],a[3],a[4]);
         else if (a[0]=="deps") Deps(a[1],a[2],a[3]);
         else if (a[0]=="noop") Noop(a[1],a[2],a[3]);
@@ -282,6 +333,7 @@ class P {
         else if (a[0]=="inse") InsE(a[1],a[2],a[3],a[4],a[5],a[6]);
         else if (a[0]=="bcsize") BcSize(a[1],a[2],a[3]);
         else if (a[0]=="clone") Clone(a[1],a[2],a[3],a[4],a[5],a[6],a[7],a.Skip(8).ToArray());
+        else if (a[0]=="cdodump") CdoDump(a[1],a[2],a[3]);
         else Relink(a[0],a[1],a[2],a[3],a[4],a[5],a[6]);
     }
 }

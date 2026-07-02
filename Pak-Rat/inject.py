@@ -382,6 +382,25 @@ def _extract_widget(dest: Path) -> tuple[Path, Path]:
     return d / f"{WIDGET_ASSET}.uasset", d / f"{WIDGET_ASSET}.uexp"
 
 
+INTERFACE_PAK_DIR = "RetroRewind/Content/VideoStore/localization/interface"
+INTERFACE_ASSET = "Interface"
+
+
+def _extract_interface(dest: Path) -> tuple[Path, Path]:
+    """repak-unpack the vanilla Interface StringTable out of the base pak."""
+    core._repak("unpack", "-f", "-o", str(dest),
+                "-i", f"{INTERFACE_PAK_DIR}/{INTERFACE_ASSET}.uasset",
+                "-i", f"{INTERFACE_PAK_DIR}/{INTERFACE_ASSET}.uexp",
+                str(core.base_pak()))
+    d = dest / Path(*INTERFACE_PAK_DIR.split("/"))
+    return d / f"{INTERFACE_ASSET}.uasset", d / f"{INTERFACE_ASSET}.uexp"
+
+
+def _title_key(item: str) -> str:
+    """The per-item localization key stamped into the CDO + Interface StringTable."""
+    return f"Interface_ModKit_{item}_Title"
+
+
 def _slot_tokens(ex: dict, index: int) -> tuple[str, str]:
     """Unique, valid-FName tokens of EXACTLY the exemplar's lengths (so every swap
     is same-length). item token replaces the class/package name; mesh token the mesh.
@@ -424,7 +443,7 @@ def _clone_exemplar(ex: dict, item: str, mesh: str,
             ex["class_token"], f"{item}_C",
             ex["mesh_path"], new_mesh_path,
             ex["mesh_name"], mesh)
-    return {"pkg_game": new_self, "cls": f"{new_self}.{item}_C"}
+    return {"pkg_game": new_self, "cls": f"{new_self}.{item}_C", "ua": out_ua}
 
 
 def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
@@ -477,6 +496,10 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     tmp = Path(tempfile.mkdtemp(prefix="pakrat_ex_"))
     src_ua, src_ux = _extract_exemplar(ex, tmp)
     cloned = _clone_exemplar(ex, item, mesh, src_ua, src_ux, stage)
+    # Point the clone's CDO at a per-item localization key; the display name is added
+    # to the Interface StringTable in run_add_pipeline (Grok's proven name mechanism).
+    _relink("setcdo", cloned["ua"], USMAP(), cloned["ua"],
+            f"Default__{item}_C", _title_key(item))
     return {"pkg": cloned["pkg_game"], "cls": cloned["cls"],
             "name": display_name, "category": ex["category"]}
 
@@ -538,6 +561,25 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
     wdest.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(cur_ua, wdest / f"{WIDGET_ASSET}.uasset")
     shutil.copyfile(cur_ua.with_suffix(".uexp"), wdest / f"{WIDGET_ASSET}.uexp")
+
+    # Custom display NAMES: rebuild the Interface StringTable from vanilla, add every
+    # manifest item's per-item title key -> its display name, and stage it in the pak
+    # (Grok's proven mechanism; the CDO title key set above resolves against this).
+    say("Applying custom names…", None)
+    stmp = Path(tempfile.mkdtemp(prefix="pakrat_st_"))
+    cur_st, _ = _extract_interface(stmp)
+    m = 0
+    for cat, lst in items_by_cat.items():
+        for it in lst:
+            item = it["pkg"].rsplit("/", 1)[-1]     # Pxxxx
+            out_st = stmp / f"st_{m}.uasset"
+            _relink("staddkey", cur_st, USMAP(), out_st, _title_key(item), it["name"])
+            cur_st = out_st
+            m += 1
+    sdest = stage / Path(*INTERFACE_PAK_DIR.split("/"))
+    sdest.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(cur_st, sdest / f"{INTERFACE_ASSET}.uasset")
+    shutil.copyfile(cur_st.with_suffix(".uexp"), sdest / f"{INTERFACE_ASSET}.uexp")
 
     # Pack V8B (FNameBasedCompression, NO path-hash seed): required so genuinely NEW
     # package paths are discoverable by the loader (V11's path-hash index is not).

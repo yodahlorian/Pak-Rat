@@ -1251,7 +1251,11 @@ class AddInputPage(QWizardPage):
         w = self.wizard()
         w.add_items = [{
             "fbx": self._fbx,
-            "name": "".join(c for c in self.name_edit.text() if c.isalnum() or c == "_"),
+            # Display name -> the item's in-catalogue title (Interface StringTable value).
+            # Keep it readable but ASCII-safe (relink stamps it as an ASCII FString).
+            "name": ("".join(c for c in self.name_edit.text()
+                             if c.isascii() and (c.isalnum() or c in " _-'")).strip()[:40]
+                     or "Custom Item"),
             "category": getattr(self.wizard(), "add_category", "Decoration"),
         }]
         return True
