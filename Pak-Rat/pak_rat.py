@@ -45,7 +45,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY = range(17)
 
-APP_VERSION = "3.0.0-beta6"
+APP_VERSION = core.APP_VERSION   # single source of truth lives in core.py
 
 # ---------------------------------------------------------------------------
 # Synthwave theme — palette sampled straight from the app icon (neon rat badge):
@@ -493,7 +493,8 @@ class ModePage(QWizardPage):
         self.cook_lab.setStyleSheet("color:#888;")
         lay.addWidget(self.cook_lab)
         lay.addSpacing(12)
-        # Add Asset (v3) — needs UE4SS for the runtime catalogue hook.
+        # Add Asset (v3) — cooks the user's model (needs UE 5.4.4, like Cook Mesh)
+        # and registers it natively via relink; no UE4SS.
         lay.addWidget(self.rb_add)
         self.add_lab = QLabel("    Inject a brand-new item (cooked from your model) "
                               "into the game's catalogue — a true addition, not a swap.")
@@ -517,9 +518,10 @@ class ModePage(QWizardPage):
         self.cook_note.setVisible(False)
         lay.addWidget(self.cook_note)
 
-        # Shown only when UE4SS is not installed (Add Asset hidden then).
-        self.add_note = QLabel("NOTE: Additional injection requires UE4SS "
-                               "(RE-UE4SS) installed in Retro Rewind.")
+        # Retained for layout; Add Asset now shares the cooker's UE 5.4.4 gate, so
+        # cook_note is the single "install Unreal" prompt and this stays hidden.
+        self.add_note = QLabel("NOTE: Add Asset requires Unreal Engine 5.4.4 "
+                               "(same as Mesh Cooking).")
         self.add_note.setWordWrap(True)
         self.add_note.setStyleSheet("color:#c08a2e; font-style:italic;")
         self.add_note.setVisible(False)
@@ -538,21 +540,20 @@ class ModePage(QWizardPage):
         self.cook_note.setVisible(not avail)
         if not avail and self.rb_cook.isChecked():
             self.rb_regular.setChecked(True)
-        # Add Asset needs UE4SS (runtime catalogue hook). Hide + hint otherwise.
+        # Add Asset cooks the user's model and registers it natively (widget-insert
+        # via relink — no UE4SS since v3), so it needs Unreal Engine 5.4.4, exactly
+        # like Cook Mesh. Gate it on the same cooker availability; cook_note already
+        # prompts to install UE, so no separate Add-Asset note.
+        self.rb_add.setVisible(avail)
+        self.add_lab.setVisible(avail)
+        self.add_note.setVisible(False)
         try:
-            ue4ss = inject.ue4ss_available()
-        except Exception:
-            ue4ss = False
-        self.rb_add.setVisible(ue4ss)
-        self.add_lab.setVisible(ue4ss)
-        self.add_note.setVisible(not ue4ss)
-        try:
-            more = ue4ss and inject.has_additions()
+            more = avail and inject.has_additions()
         except Exception:
             more = False
         self.rb_add.setText("Add more assets  (inject brand-new content)" if more
                             else "Add Asset  (inject brand-new content)")
-        if not ue4ss and self.rb_add.isChecked():
+        if not avail and self.rb_add.isChecked():
             self.rb_regular.setChecked(True)
         self.group.idToggled.connect(self._on_toggle)
 
@@ -1199,38 +1200,62 @@ class AddInputPage(QWizardPage):
         super().__init__()
         self.setTitle("Add a new item")
         self.setSubTitle("Bring your own model — Pak Rat cooks it into a brand-new "
-                         "catalogue item and registers it with UE4SS.")
+                         "catalogue item and adds it straight to the game's catalogue.")
         self._fbx = None
+
+        self._texture = None
+        self._thumbnail = None
 
         self.pick_btn = QPushButton("Choose a 3D model…")
         self.pick_lbl = QLabel("No model selected.")
         self.pick_lbl.setStyleSheet("color:#888;")
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Item name (letters/numbers, e.g. MyLamp)")
+        self.price_edit = QLineEdit()
+        self.price_edit.setPlaceholderText("Price (whole number, e.g. 100)")
 
-        note = QLabel("Beta: your item is built by cloning a real catalogue item and "
-                      "swapping in your mesh, so it appears under that item's name / "
-                      "thumbnail / price for now — with YOUR model in-world. Custom "
-                      "name & price are coming.")
+        self.tex_btn = QPushButton("Choose a texture (model skin)…")
+        self.tex_lbl = QLabel("Optional — uses the model's own texture if left blank.")
+        self.tex_lbl.setStyleSheet("color:#888;")
+        self.thumb_btn = QPushButton("Choose a catalogue thumbnail…")
+        self.thumb_lbl = QLabel("Optional — reuses the base item's icon if left blank.")
+        self.thumb_lbl.setStyleSheet("color:#888;")
+
+        self.reset_chk = QCheckBox("Clear previously-added items first (start fresh)")
+        self.reset_chk.setStyleSheet("color:#888;")
+
+        note = QLabel("Your item is built by cloning a real catalogue item and swapping "
+                      "in your model — with your name, price, texture and thumbnail.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#c08a2e; font-style:italic;")
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.pick_btn)
         lay.addWidget(self.pick_lbl)
-        lay.addSpacing(10)
+        lay.addSpacing(8)
         lay.addWidget(QLabel("Name"))
         lay.addWidget(self.name_edit)
+        lay.addWidget(QLabel("Price"))
+        lay.addWidget(self.price_edit)
+        lay.addSpacing(8)
+        lay.addWidget(self.tex_btn)
+        lay.addWidget(self.tex_lbl)
+        lay.addWidget(self.thumb_btn)
+        lay.addWidget(self.thumb_lbl)
+        lay.addSpacing(8)
+        lay.addWidget(self.reset_chk)
         lay.addStretch(1)
         lay.addWidget(note)
 
         self.pick_btn.clicked.connect(self._pick)
+        self.tex_btn.clicked.connect(self._pick_texture)
+        self.thumb_btn.clicked.connect(self._pick_thumbnail)
         self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
 
     def initializePage(self):
         t = getattr(self.wizard(), "add_type", "Decoration")
         self.setSubTitle(f"Adding a new {t}. Bring your own model — Pak Rat cooks it "
-                         "into a brand-new catalogue item and registers it with UE4SS.")
+                         "into a brand-new catalogue item and adds it straight to the game's catalogue.")
 
     def _pick(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1244,8 +1269,30 @@ class AddInputPage(QWizardPage):
                 self.name_edit.setText("".join(c for c in stem if c.isalnum()) or "MyItem")
             self.completeChanged.emit()
 
+    def _pick_texture(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a texture (model skin)", "", _image_filter())
+        if path:
+            self._texture = path
+            self.tex_lbl.setText(_basename(path))
+
+    def _pick_thumbnail(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a catalogue thumbnail", "", _image_filter())
+        if path:
+            self._thumbnail = path
+            self.thumb_lbl.setText(_basename(path))
+
     def isComplete(self):
         return bool(self._fbx) and bool(self.name_edit.text().strip())
+
+    def _price(self):
+        """Parse the price field -> float, or None (falls back to a default)."""
+        txt = self.price_edit.text().strip().lstrip("$").replace(",", "")
+        try:
+            return float(txt) if txt else None
+        except ValueError:
+            return None
 
     def validatePage(self):
         w = self.wizard()
@@ -1257,7 +1304,11 @@ class AddInputPage(QWizardPage):
                              if c.isascii() and (c.isalnum() or c in " _-'")).strip()[:40]
                      or "Custom Item"),
             "category": getattr(self.wizard(), "add_category", "Decoration"),
+            "price": self._price(),
+            "texture": self._texture,
+            "thumbnail": self._thumbnail,
         }]
+        w.add_reset = self.reset_chk.isChecked()
         return True
 
     def nextId(self):
@@ -1770,7 +1821,7 @@ class PipelineWorker(QThread):
 
     def __init__(self, mode, mesh_plan, mesh_user_files,
                  cook_items=None, tex_items=None, combine_selected=None,
-                 cook_tex_items=None, add_items=None):
+                 cook_tex_items=None, add_items=None, add_reset=False):
         super().__init__()
         self.mode = mode
         self.mesh_plan = mesh_plan
@@ -1780,6 +1831,7 @@ class PipelineWorker(QThread):
         self.combine_selected = combine_selected or []
         self.cook_tex_items = cook_tex_items or {}
         self.add_items = add_items or []
+        self.add_reset = add_reset
         self.add_meta = None   # {mod, ini} for add mode — bundled on deploy/finish
 
     def run(self):
@@ -1792,7 +1844,7 @@ class PipelineWorker(QThread):
                     progress=lambda m, p=None: self.status.emit(m))
             elif self.mode == "add":
                 result = inject.run_add_pipeline(
-                    self.add_items,
+                    self.add_items, reset=self.add_reset,
                     progress=lambda m, p=None: self.status.emit(m))
                 pak = result["pak"]
                 # Native pak (widget-insert registration) — self-contained, no
@@ -1843,7 +1895,8 @@ class ProcessPage(QWizardPage):
             getattr(w, "mesh_user_files", {}), getattr(w, "cook_items", {}),
             getattr(w, "tex_items", {}), getattr(w, "combine_selected", []),
             getattr(w, "cook_tex_items", {}),
-            add_items=getattr(w, "add_items", []))
+            add_items=getattr(w, "add_items", []),
+            add_reset=getattr(w, "add_reset", False))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import core
 import cook
+import relink
 
 # Category -> the widget function that returns that category's class array.
 CATEGORIES = ("Decoration", "Equipmement", "Station", "Container")
@@ -249,9 +250,11 @@ def manifest_items() -> dict[str, list[dict]]:
             continue
         d = cp[sec]
         cat = d.get("category", "Decoration")
+        price = d.get("price", "")
         out.setdefault(cat, []).append({
             "pkg": d.get("pkg", ""), "cls": d.get("cls", ""),
             "name": d.get("name", sec[5:]),
+            "price": float(price) if price else None,
         })
     return out
 
@@ -259,7 +262,7 @@ def manifest_items() -> dict[str, list[dict]]:
 def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
     cp = configparser.ConfigParser()
     cp["pakrat"] = {
-        "version": "3.0.0-beta6",
+        "version": core.APP_VERSION,
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     for cat, lst in items_by_cat.items():
@@ -268,6 +271,7 @@ def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
             cp[key] = {
                 "category": cat, "name": it.get("name", ""),
                 "pkg": it["pkg"], "cls": it["cls"],
+                "price": str(it.get("price") if it.get("price") is not None else ""),
             }
     p = manifest_path()
     with p.open("w", encoding="utf-8") as f:
@@ -278,6 +282,16 @@ def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
 def has_additions() -> bool:
     """True if any items were previously added (drives the Page-1 label flip)."""
     return bool(manifest_items())
+
+
+def reset_additions() -> None:
+    """Wipe the additions manifest so the next Add starts from a clean catalogue.
+    Fixes #5: the manifest is additive and replays EVERY past item into each
+    generated pak, so stale test entries showed up as extra catalogue items."""
+    try:
+        manifest_path().unlink()
+    except FileNotFoundError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -309,10 +323,23 @@ EXEMPLARS = {
         "class_token": "Couch_C",
         "mesh_path": "/Game/VideoStore/asset/meshes/LA_Chair_A_01",
         "mesh_name": "LA_Chair_A_01",
+        # The CDO's inline localisation title-key. Its BYTE LENGTH sets the added
+        # item's token length so relink.setcdo stays length-neutral (no CDO shift
+        # -> no price-0 / blank-thumb / crash regression). See relink.setcdo.
+        "cdo_title_key": "Interface_Product_Decoration_Couch",   # 34 chars
+        # Catalogue thumbnail texture (a T_*_T in the item's own folder). Renamed by
+        # clone + reskinned with the user's image when a custom thumbnail is given.
+        "thumb_path": "/Game/VideoStore/asset/prop/decoration/Couch/T_Decoration_Couch_T",
+        "thumb_name": "T_Decoration_Couch_T",
+        "default_price": 100.0,
     },
     # Shelves/Equipment: add their own exemplar (a real shelf / fridge) once the
     # Decoration clone path is confirmed in-game; the machinery below is generic.
 }
+
+# Length of the fixed affixes around the item token in the CDO title-key
+# ("Interface_ModKit_" + <token> + "_Title"). Token length = key length - this.
+_TITLE_AFFIX = len("Interface_ModKit_") + len("_Title")   # 17 + 6 = 23
 
 # Import + cook a user FBX into a StaticMesh at a chosen /Game path. This half of the
 # old cooker always worked (it was the stub BP that failed) — reused verbatim.
@@ -347,9 +374,6 @@ except Exception:
 # class into the catalogue widget's product-class bytecode with the correct +9B
 # cooked relink. Replaces the old byte-.replace clone AND the whole UE4SS/Lua path.
 # ---------------------------------------------------------------------------
-RELINK = lambda: core.VENDOR("relink", "relink.exe")          # noqa: E731 (onedir: no single-file bootloader -> no AV false-positive)
-USMAP = lambda: core.VENDOR("RetroRewindMappings.usmap")      # noqa: E731
-
 WIDGET_PAK_DIR = "RetroRewind/Content/VideoStore/asset/prop/catalogue"
 WIDGET_ASSET = "UI_Catalogue_Widget"
 
@@ -362,14 +386,6 @@ CAT_WIDGET = {
     "Equipmement": ("Return Catalogue Decoration product class", "Couch_C"),
     "Station":     ("Return Catalogue Decoration product class", "Couch_C"),
 }
-
-
-def _relink(*args) -> None:
-    """Invoke the vendored relink.exe; raise on non-zero exit."""
-    r = core._run([str(RELINK()), *[str(a) for a in args]])
-    if r.returncode != 0:
-        raise RuntimeError(f"relink '{args[0] if args else ''}' failed: "
-                           f"{r.stderr or r.stdout}")
 
 
 def _extract_widget(dest: Path) -> tuple[Path, Path]:
@@ -402,11 +418,13 @@ def _title_key(item: str) -> str:
 
 
 def _slot_tokens(ex: dict, index: int) -> tuple[str, str]:
-    """Unique, valid-FName tokens of EXACTLY the exemplar's lengths (so every swap
-    is same-length). item token replaces the class/package name; mesh token the mesh.
-    """
-    nlen, mlen = len(ex["asset"]), len(ex["mesh_name"])
-    item = ("P" + format(index, "X").zfill(nlen - 1))[:nlen]
+    """Unique, valid-FName tokens. The item token length is chosen so the CDO
+    title-key `Interface_ModKit_<item>_Title` matches the exemplar's existing key
+    byte length (LENGTH-NEUTRAL setcdo -> no CDO corruption). The mesh token keeps
+    the exemplar mesh-name length (clone renames are any-length regardless)."""
+    ilen = len(ex["cdo_title_key"]) - _TITLE_AFFIX      # Couch: 34 - 23 = 11
+    mlen = len(ex["mesh_name"])
+    item = ("P" + str(index).zfill(ilen - 1))[:ilen]
     mesh = ("M" + format(index, "X").zfill(mlen - 1))[:mlen]
     return item, mesh
 
@@ -423,11 +441,14 @@ def _extract_exemplar(ex: dict, dest: Path) -> tuple[Path, Path]:
 
 
 def _clone_exemplar(ex: dict, item: str, mesh: str,
-                    src_ua: Path, src_ux: Path, stage: Path) -> dict:
+                    src_ua: Path, src_ux: Path, stage: Path,
+                    thumb_token: str | None = None) -> dict:
     """RE-SERIALISE the exemplar into a NEW package identity (fresh PackageGuid +
-    PackageSource + FolderName) pointing at the user's cooked mesh, via relink.exe
-    `clone` (any-length exact renames). Stages <item>.uasset/.uexp under the pak
-    tree. Returns {pkg_game, cls}."""
+    PackageSource + FolderName) pointing at the user's cooked mesh, via
+    relink.clone (in-process, any-length exact name-map renames). Stages
+    <item>.uasset/.uexp under the pak tree. When `thumb_token` is given, also
+    repoints the catalogue thumbnail to the item's own texture (custom thumbnail).
+    Returns {pkg_game, cls, ua, thumb_path}."""
     base = ex["self_path"].rsplit("/", 2)[0]            # .../decoration
     new_self = f"{base}/{item}/{item}"
     new_mesh_path = f"{ex['mesh_path'].rsplit('/', 1)[0]}/{mesh}"
@@ -436,14 +457,19 @@ def _clone_exemplar(ex: dict, item: str, mesh: str,
     dest = stage / Path(*mount_dir.split("/"))
     dest.mkdir(parents=True, exist_ok=True)
     out_ua = dest / f"{item}.uasset"
-    # clone <ex> <usmap> <out> <oldSelf> <newSelf> <oldCls> <newCls> [old new ...]
-    # trailing pairs: mesh package ref + mesh object name -> the user's cooked mesh.
-    _relink("clone", src_ua, USMAP(), out_ua,
-            ex["self_path"], new_self,
-            ex["class_token"], f"{item}_C",
-            ex["mesh_path"], new_mesh_path,
-            ex["mesh_name"], mesh)
-    return {"pkg_game": new_self, "cls": f"{new_self}.{item}_C", "ua": out_ua}
+
+    # trailing rename pairs: mesh package ref + mesh object name (always); the
+    # thumbnail package ref + object name (only for a custom thumbnail).
+    extra = [ex["mesh_path"], new_mesh_path, ex["mesh_name"], mesh]
+    new_thumb_path = None
+    if thumb_token:
+        new_thumb_path = f"{game_dir}/{thumb_token}"
+        extra += [ex["thumb_path"], new_thumb_path, ex["thumb_name"], thumb_token]
+
+    relink.clone(src_ua, out_ua, ex["self_path"], new_self,
+                 ex["class_token"], f"{item}_C", *extra)
+    return {"pkg_game": new_self, "cls": f"{new_self}.{item}_C", "ua": out_ua,
+            "thumb_path": new_thumb_path}
 
 
 def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
@@ -483,28 +509,95 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
 
 def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
                      category: str, index: int, stage: Path,
-                     progress=None) -> dict:
-    """Cook the user's mesh + clone the type's exemplar to point at it. Returns the
-    manifest entry {pkg, cls, name, category}."""
+                     price: float | None = None, texture: str | None = None,
+                     thumbnail: str | None = None, progress=None) -> dict:
+    """Cook the user's mesh + clone the type's exemplar to point at it, then stamp
+    the item's CDO (custom name key + price) LENGTH-NEUTRALLY. Optional `texture`
+    reskins the mesh; optional `thumbnail` gives a custom catalogue icon. Returns
+    the manifest entry {pkg, cls, name, category, price}."""
     ex = EXEMPLARS.get(category) or EXEMPLARS["Decoration"]
     item, mesh = _slot_tokens(ex, index)
     if _cook_user_mesh(env, fbx, mesh, stage, progress=progress) == 0:
         raise RuntimeError(
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
+    if texture:
+        if progress:
+            progress("Applying custom texture…", None)
+        _apply_mesh_skin(mesh, texture, stage)
+
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="pakrat_ex_"))
     src_ua, src_ux = _extract_exemplar(ex, tmp)
-    cloned = _clone_exemplar(ex, item, mesh, src_ua, src_ux, stage)
-    # Point the clone's CDO at a per-item localization key; the display name is added
-    # to the Interface StringTable in run_add_pipeline (Grok's proven name mechanism).
-    _relink("setcdo", cloned["ua"], USMAP(), cloned["ua"],
-            f"Default__{item}_C", _title_key(item))
-    return {"pkg": cloned["pkg_game"], "cls": cloned["cls"],
-            "name": display_name, "category": ex["category"]}
+    thumb_token = f"T_{item}_T" if thumbnail else None
+    cloned = _clone_exemplar(ex, item, mesh, src_ua, src_ux, stage,
+                             thumb_token=thumb_token)
+    if thumbnail and cloned["thumb_path"]:
+        if progress:
+            progress("Building custom thumbnail…", None)
+        _stage_custom_thumbnail(ex, thumbnail, cloned["thumb_path"], thumb_token, stage)
+
+    # CDO: swap the localisation title-key (name resolves via the StringTable set in
+    # run_add_pipeline) AND set the price — both length-neutral in-place (the #6/#7
+    # fix: token length was chosen so the key byte length is unchanged).
+    p = float(price) if price is not None else ex.get("default_price", 0.0)
+    relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
+                  _title_key(item), price=p)
+    return {"pkg": cloned["pkg_game"], "cls": cloned["cls"], "name": display_name,
+            "category": ex["category"], "price": p}
 
 
-def run_add_pipeline(items: list[dict], progress=None) -> dict:
+# ---------------------------------------------------------------------------
+# Custom texture / thumbnail — reskin an existing texture with the user's image
+# via the vendored injector (encodes to the texture's own dxgi format + mips).
+# The base texture is live-extracted from the game; the reskinned copy is then
+# re-identitied to the item's own package path via relink.clone and staged.
+# (UE/game-box paths — validated in Tron's in-game acceptance test.)
+# ---------------------------------------------------------------------------
+def _reskin_and_stage(base_mount: str, user_image: str, new_game_path: str,
+                      old_leaf: str, new_leaf: str, stage: Path) -> None:
+    """Extract `base_mount` from the game, inject `user_image`, re-identity it to
+    `new_game_path` (fresh package + leaf rename), and stage it under the pak."""
+    spec = core.prepare_target(base_mount)               # extract + read dxgi/WxH
+    prepared = core.prepare_image(user_image, spec)      # match format/size
+    core._injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
+                    "--version", core.UE_VERSION, "--outdir",
+                    str(Path(spec.uasset_path).parent)])
+    mount_dir = "RetroRewind/Content/" + new_game_path.rsplit("/", 1)[0][len("/Game/"):]
+    dest = stage / Path(*mount_dir.split("/"))
+    dest.mkdir(parents=True, exist_ok=True)
+    out_ua = dest / f"{new_leaf}.uasset"
+    old_game = base_mount.replace("RetroRewind/Content/", "/Game/", 1)
+    # a texture has no _C class/CDO -> pass '-' to skip those renames; just repath.
+    relink.clone(spec.uasset_path, out_ua, old_game, new_game_path,
+                 old_leaf, new_leaf, "-", "-")
+
+
+def _apply_mesh_skin(mesh_token: str, user_image: str, stage: Path) -> None:
+    """Reskin the cooked user mesh's base-colour texture with `user_image`. The
+    cook imported the mesh's material/textures; we inject over the base colour."""
+    mount = f"RetroRewind/Content/{MESH_ROOT[len('/Game/'):]}/{mesh_token}"
+    # The imported base-colour texture sits beside the mesh; inject in place on the
+    # staged copy (already under the pak tree from _cook_user_mesh).
+    staged = stage / Path(*mount.split("/"))
+    ua = staged.with_suffix(".uasset")
+    if ua.is_file():
+        prepared_png = user_image  # injector accepts the source image directly
+        core._injector([str(ua), prepared_png, "--mode", "inject",
+                        "--version", core.UE_VERSION, "--outdir", str(ua.parent)])
+
+
+def _stage_custom_thumbnail(ex: dict, user_image: str, new_thumb_game_path: str,
+                            thumb_token: str, stage: Path) -> None:
+    """Build the item's catalogue thumbnail from `user_image`, re-identitied to the
+    item's own thumbnail package path (the clone already repointed the CDO to it)."""
+    _reskin_and_stage(
+        base_mount=ex["thumb_path"].replace("/Game/", "RetroRewind/Content/", 1),
+        user_image=user_image, new_game_path=new_thumb_game_path,
+        old_leaf=ex["thumb_name"], new_leaf=thumb_token, stage=stage)
+
+
+def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> dict:
     """
     items: [{'fbx': path, 'name': str, 'category': 'Decoration'}, …]
     Per item: cook the user's mesh, then RE-SERIALISE a fresh-identity clone of the
@@ -528,6 +621,8 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
     stage.mkdir(parents=True, exist_ok=True)      # repak needs the dir to exist
 
     # Global, ever-increasing slot index keeps every added class name unique.
+    if reset:                       # #5: start from a clean catalogue on request
+        reset_additions()
     existing = manifest_items()
     base_index = sum(len(v) for v in existing.values())
     built = []
@@ -535,14 +630,16 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
         entry = build_added_item(
             env, it["fbx"], it.get("name") or f"PakRatItem{i}",
             it.get("category", "Decoration"), base_index + i, stage,
-            progress=progress)
+            price=it.get("price"), texture=it.get("texture"),
+            thumbnail=it.get("thumbnail"), progress=progress)
         built.append(entry)
 
     # Merge new items into the manifest (additive) — it drives the widget insert.
     items_by_cat = existing
     for e in built:
         items_by_cat.setdefault(e["category"], []).append(
-            {"pkg": e["pkg"], "cls": e["cls"], "name": e["name"]})
+            {"pkg": e["pkg"], "cls": e["cls"], "name": e["name"],
+             "price": e.get("price")})
 
     # Register EVERY manifest item natively into the catalogue widget: start from a
     # fresh vanilla widget, chain one insert per item (each output feeds the next).
@@ -554,7 +651,11 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
         fn, sib = CAT_WIDGET.get(cat, CAT_WIDGET["Decoration"])
         for it in lst:
             out_ua = wtmp / f"widget_{n}.uasset"
-            _relink(cur_ua, USMAP(), out_ua, it["pkg"], it["cls"], sib, fn)
+            # widget_insert wants the LEAF class name (P…_C), not the full object
+            # path stored in it["cls"] (…/P.P…_C) — the import ObjectName + its
+            # Default__<leaf> CDO import derive from the leaf.
+            leaf_cls = it["cls"].rsplit(".", 1)[-1]
+            relink.widget_insert(cur_ua, out_ua, it["pkg"], leaf_cls, sib, fn)
             cur_ua = out_ua
             n += 1
     wdest = stage / Path(*WIDGET_PAK_DIR.split("/"))
@@ -573,7 +674,7 @@ def run_add_pipeline(items: list[dict], progress=None) -> dict:
         for it in lst:
             item = it["pkg"].rsplit("/", 1)[-1]     # Pxxxx
             out_st = stmp / f"st_{m}.uasset"
-            _relink("staddkey", cur_st, USMAP(), out_st, _title_key(item), it["name"])
+            relink.staddkey(cur_st, out_st, _title_key(item), it["name"])
             cur_st = out_st
             m += 1
     sdest = stage / Path(*INTERFACE_PAK_DIR.split("/"))

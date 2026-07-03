@@ -22,6 +22,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+# Single source of truth for the app version — pak_rat.py (APP_VERSION) and
+# inject.py (manifest 'version') both read this so the build can't label itself
+# an older beta again (#2: exe reported b6 while shipping b8).
+APP_VERSION = "3.0.0-beta9"
+
 UE_VERSION = "5.4"           # RR is UE 5.4 (verified via injector 'check')
 PAK_VERSION = "V11"
 PAK_MOUNT = "../../../"
@@ -294,6 +299,12 @@ def _generate_clean_lists() -> None:
         if not e.endswith(".uasset"):
             continue
         m = e[:-7]
+        # Skip localization copies (RetroRewind/Content/L10N/<lang>/…). They are
+        # per-language duplicates of the SAME texture (#8: T_PricePoster_A_01_bc
+        # appeared 20× — 1 canonical + 17 L10N — flooding the swap picker). The
+        # mesh branch already dodges this via its _MESH_ROOT anchor.
+        if "/L10N/" in m:
+            continue
         leaf = m.rsplit("/", 1)[-1]
         if leaf.startswith("T_") and leaf.endswith("_bc"):
             tex.append(m)
@@ -523,6 +534,21 @@ def mesh_overlay_assets(mesh: str) -> list[str]:
     return sorted(mats) + sorted(texs)
 
 
+def _thumbnail_siblings(asset: str) -> list[str]:
+    """Catalogue thumbnail(s) in the same folder as `asset` (named `T_*_T`, e.g.
+    `T_Decoration_<Item>_T`). #5: extracting an example item as an injection
+    template should carry its thumbnail so it can be viewed / reused / swapped."""
+    folder = asset.rsplit("/", 1)[0]
+    out = []
+    for m in load_assets():
+        if m == asset or m.rsplit("/", 1)[0] != folder:
+            continue
+        leaf = m.rsplit("/", 1)[-1]
+        if leaf.startswith("T_") and leaf.endswith("_T"):
+            out.append(m)
+    return sorted(out)
+
+
 def related_assets(asset: str, limit: int = 16) -> list[str]:
     """Siblings to auto-include when extracting `asset`. Stays within the
     canonical set — base-colour textures (T_*_bc), the meshes folder, and (for a
@@ -536,8 +562,9 @@ def related_assets(asset: str, limit: int = 16) -> list[str]:
         return sorted(m for m in load_assets()
                       if m != asset and m.rsplit("/", 1)[0] == folder)[:limit]
     if kind == "mesh":
-        return mesh_overlay_assets(asset)[:limit]
-    return []
+        return (mesh_overlay_assets(asset) + _thumbnail_siblings(asset))[:limit]
+    # BP / catalogue item -> its thumbnail (T_..._T) as an injection template (#5).
+    return _thumbnail_siblings(asset)[:limit]
 
 
 def export_assets(assets: list[str], dest_dir: str, fmt: str = "png",
