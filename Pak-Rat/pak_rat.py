@@ -1215,7 +1215,8 @@ class AddInputPage(QWizardPage):
         self.price_edit.setPlaceholderText("Price (whole number, e.g. 100)")
 
         self.tex_btn = QPushButton("Choose a texture (model skin)…")
-        self.tex_lbl = QLabel("Optional — uses the model's own texture if left blank.")
+        self.tex_lbl = QLabel("Skin swap is coming — for now, bake the texture into "
+                              "your model. (This picker is a no-op this build.)")
         self.tex_lbl.setStyleSheet("color:#888;")
         self.thumb_btn = QPushButton("Choose a catalogue thumbnail…")
         self.thumb_lbl = QLabel("Optional — reuses the base item's icon if left blank.")

@@ -512,30 +512,48 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
                      price: float | None = None, texture: str | None = None,
                      thumbnail: str | None = None, progress=None) -> dict:
     """Cook the user's mesh + clone the type's exemplar to point at it, then stamp
-    the item's CDO (custom name key + price) LENGTH-NEUTRALLY. Optional `texture`
-    reskins the mesh; optional `thumbnail` gives a custom catalogue icon. Returns
-    the manifest entry {pkg, cls, name, category, price}."""
+    the item's CDO (custom name key + price) LENGTH-NEUTRALLY. Optional `thumbnail`
+    gives a custom catalogue icon (best-effort; falls back to the default icon).
+    `texture` (mesh skin) is deferred — bake it into the model. Returns the manifest
+    entry {pkg, cls, name, category, price}."""
     ex = EXEMPLARS.get(category) or EXEMPLARS["Decoration"]
     item, mesh = _slot_tokens(ex, index)
     if _cook_user_mesh(env, fbx, mesh, stage, progress=progress) == 0:
         raise RuntimeError(
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
-    if texture:
-        if progress:
-            progress("Applying custom texture…", None)
-        _apply_mesh_skin(mesh, texture, stage)
+
+    # Custom mesh skin (texture) is DEFERRED: a real skin swap needs the cook to
+    # emit + ship the model's own base-colour texture (game-box work). Bake the
+    # texture into your model for now. Never fatal — just a note. (The earlier path
+    # wrongly injected the image into the MESH uasset, which crashed the build.)
+    if texture and progress:
+        progress("Note: a separate skin isn't applied yet — bake it into your "
+                 "model. Continuing…", None)
 
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="pakrat_ex_"))
     src_ua, src_ux = _extract_exemplar(ex, tmp)
-    thumb_token = f"T_{item}_T" if thumbnail else None
+
+    # Custom thumbnail — build it FIRST; only repoint the item to it if it fully
+    # succeeds, otherwise keep the exemplar's icon (a real icon beats a blank one).
+    # Best-effort and NON-FATAL: a thumbnail hiccup must never fail the whole add.
+    thumb_token = None
+    if thumbnail:
+        try:
+            if progress:
+                progress("Building custom thumbnail…", None)
+            tok = f"T_{item}_T"
+            base = ex["self_path"].rsplit("/", 2)[0]            # .../decoration
+            new_thumb_game = f"{base}/{item}/{tok}"             # matches _clone_exemplar
+            _stage_custom_thumbnail(ex, thumbnail, new_thumb_game, tok, stage)
+            thumb_token = tok                                   # success -> clone repoints to it
+        except Exception as e:
+            if progress:
+                progress(f"Custom thumbnail skipped ({e}); using the default icon.", None)
+
     cloned = _clone_exemplar(ex, item, mesh, src_ua, src_ux, stage,
                              thumb_token=thumb_token)
-    if thumbnail and cloned["thumb_path"]:
-        if progress:
-            progress("Building custom thumbnail…", None)
-        _stage_custom_thumbnail(ex, thumbnail, cloned["thumb_path"], thumb_token, stage)
 
     # CDO: swap the localisation title-key (name resolves via the StringTable set in
     # run_add_pipeline) AND set the price — both length-neutral in-place (the #6/#7
@@ -556,35 +574,29 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
 # ---------------------------------------------------------------------------
 def _reskin_and_stage(base_mount: str, user_image: str, new_game_path: str,
                       old_leaf: str, new_leaf: str, stage: Path) -> None:
-    """Extract `base_mount` from the game, inject `user_image`, re-identity it to
-    `new_game_path` (fresh package + leaf rename), and stage it under the pak."""
+    """Extract `base_mount` from the game, inject `user_image` (the injector WRITES
+    the modified asset into --save_folder, it does not edit in place), re-identity
+    the result to `new_game_path`, and stage it under the pak."""
     spec = core.prepare_target(base_mount)               # extract + read dxgi/WxH
-    prepared = core.prepare_image(user_image, spec)      # match format/size
-    core._injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
-                    "--version", core.UE_VERSION, "--outdir",
-                    str(Path(spec.uasset_path).parent)])
-    mount_dir = "RetroRewind/Content/" + new_game_path.rsplit("/", 1)[0][len("/Game/"):]
-    dest = stage / Path(*mount_dir.split("/"))
-    dest.mkdir(parents=True, exist_ok=True)
-    out_ua = dest / f"{new_leaf}.uasset"
-    old_game = base_mount.replace("RetroRewind/Content/", "/Game/", 1)
-    # a texture has no _C class/CDO -> pass '-' to skip those renames; just repath.
-    relink.clone(spec.uasset_path, out_ua, old_game, new_game_path,
-                 old_leaf, new_leaf, "-", "-")
-
-
-def _apply_mesh_skin(mesh_token: str, user_image: str, stage: Path) -> None:
-    """Reskin the cooked user mesh's base-colour texture with `user_image`. The
-    cook imported the mesh's material/textures; we inject over the base colour."""
-    mount = f"RetroRewind/Content/{MESH_ROOT[len('/Game/'):]}/{mesh_token}"
-    # The imported base-colour texture sits beside the mesh; inject in place on the
-    # staged copy (already under the pak tree from _cook_user_mesh).
-    staged = stage / Path(*mount.split("/"))
-    ua = staged.with_suffix(".uasset")
-    if ua.is_file():
-        prepared_png = user_image  # injector accepts the source image directly
-        core._injector([str(ua), prepared_png, "--mode", "inject",
-                        "--version", core.UE_VERSION, "--outdir", str(ua.parent)])
+    try:
+        prepared = core.prepare_image(user_image, spec)  # resize to the target WxH
+        injected = Path(spec.work_dir) / "reskin"
+        injected.mkdir(parents=True, exist_ok=True)
+        core._injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
+                        "--version", core.UE_VERSION, "--save_folder", str(injected)])
+        injected_ua = injected / f"{old_leaf}.uasset"
+        if not injected_ua.is_file():
+            raise RuntimeError("injector produced no output texture")
+        mount_dir = "RetroRewind/Content/" + new_game_path.rsplit("/", 1)[0][len("/Game/"):]
+        dest = stage / Path(*mount_dir.split("/"))
+        dest.mkdir(parents=True, exist_ok=True)
+        out_ua = dest / f"{new_leaf}.uasset"
+        old_game = base_mount.replace("RetroRewind/Content/", "/Game/", 1)
+        # a texture has no _C class/CDO -> pass '-' to skip those renames; just repath.
+        relink.clone(injected_ua, out_ua, old_game, new_game_path,
+                     old_leaf, new_leaf, "-", "-")
+    finally:
+        core.cleanup_target(spec)
 
 
 def _stage_custom_thumbnail(ex: dict, user_image: str, new_thumb_game_path: str,
