@@ -192,10 +192,15 @@ def export_mesh(mount: str, dest_dir: str, fmt: str, progress=None) -> list[str]
                 progress(f"Converting {leaf} → {fmt.upper()}…")
             _blender_uemodel_convert(uemodel, out, progress=progress)
             written.append(out)
-            for f in glob.glob(os.path.join(stage, "*.png")):   # carry textures along
-                dst = os.path.join(out_dir, os.path.basename(f))
-                shutil.copy2(f, dst)
-                written.append(dst)
+            # carry EVERY texture/material sidecar along (recursively) — same as
+            # uemodel — so the model's maps aren't lost even if the FBX/OBJ doesn't
+            # embed them. (.uemodel itself is skipped; it was just the conversion src.)
+            for f in glob.glob(os.path.join(stage, "**", "*"), recursive=True):
+                if os.path.isfile(f) and not f.lower().endswith(".uemodel"):
+                    dst = os.path.join(out_dir, os.path.basename(f))
+                    if not os.path.exists(dst):
+                        shutil.copy2(f, dst)
+                        written.append(dst)
         return written
     finally:
         shutil.rmtree(stage, ignore_errors=True)
