@@ -1190,11 +1190,12 @@ class AddCategoryPage(QWizardPage):
         return True
 
     def nextId(self):
-        return PAGE_ADDEXEMPLAR
+        return PAGE_ADDINPUT
 
 
 # ---------------------------------------------------------------------------
-# Add-asset step 1b (v3) — choose WHICH base item to clone (floor vs wall-mounted).
+# (Legacy) standalone floor/wall page — superseded by the per-item "Base" dropdown
+# on AddInputPage so multi-add picks placement PER asset. Kept unregistered.
 # ---------------------------------------------------------------------------
 class ExemplarPage(QWizardPage):
     def __init__(self):
@@ -1317,8 +1318,13 @@ class AddInputPage(QWizardPage):
         qscroll.setWidget(self._qbox_host)
         qscroll.setMaximumHeight(110)
 
+        # Per-item base (floor vs wall-mounted) — so a multi-add batch can mix them.
+        self.base_combo = QComboBox()
+
         lay = QVBoxLayout(self)
         lay.addLayout(_row((self.pick_btn, 0), (self.pick_lbl, 1)))
+        lay.addSpacing(6)
+        lay.addLayout(_row((QLabel("Base"), 0), (self.base_combo, 1)))
         lay.addSpacing(6)
 
         name_price = QHBoxLayout()
@@ -1348,8 +1354,14 @@ class AddInputPage(QWizardPage):
 
     def initializePage(self):
         t = getattr(self.wizard(), "add_type", "Decoration")
-        self.setSubTitle(f"Adding new {t} items. Fill one in, hit “Add another” to queue "
-                         "more, then Next builds the whole batch into the catalogue in one push.")
+        self.setSubTitle(f"Adding new {t} items. Pick a base (floor / wall-mounted), fill "
+                         "one in, hit “Add another” to queue more, then Next builds the batch.")
+        cat = getattr(self.wizard(), "add_category", "Decoration")
+        self.base_combo.clear()
+        for ex in (inject.exemplars_for(cat) or inject.exemplars_for("Decoration")):
+            tag = {"floor": "Floor", "wall": "Wall-mounted"}.get(ex.get("placement"), "Item")
+            self.base_combo.addItem(f"{tag} — {ex['label']}", ex["id"])
+        self.base_combo.setVisible(self.base_combo.count() > 1)
         self._queue = []
         self._clear_form()
         self._refresh_queue()
@@ -1399,7 +1411,7 @@ class AddInputPage(QWizardPage):
             "fbx": self._fbx,
             "name": self._item_name(),
             "category": getattr(self.wizard(), "add_category", "Decoration"),
-            "exemplar": getattr(self.wizard(), "add_exemplar", None),
+            "exemplar": self.base_combo.currentData(),   # per-item floor/wall base
             "price": self._price(),
             "texture": self._texture,
             "thumbnail": self._thumbnail,
@@ -2716,7 +2728,6 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_COMBINESRC, CombineSourcePage())
         self.setPage(PAGE_COMBINESEL, CombineSelectPage())
         self.setPage(PAGE_ADDCATEGORY, AddCategoryPage())
-        self.setPage(PAGE_ADDEXEMPLAR, ExemplarPage())
         self.setPage(PAGE_ADDINPUT, AddInputPage())
         self.setStartId(PAGE_MODE)
 

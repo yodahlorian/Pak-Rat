@@ -25,7 +25,7 @@ from pathlib import Path
 # Single source of truth for the app version — pak_rat.py (APP_VERSION) and
 # inject.py (manifest 'version') both read this so the build can't label itself
 # an older beta again (#2: exe reported b6 while shipping b8).
-APP_VERSION = "3.0.0-beta16"
+APP_VERSION = "3.0.0-beta17"
 
 UE_VERSION = "5.4"           # RR is UE 5.4 (verified via injector 'check')
 PAK_VERSION = "V11"
