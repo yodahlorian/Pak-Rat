@@ -1202,6 +1202,7 @@ class AddInputPage(QWizardPage):
         self.setSubTitle("Bring your own model — Pak Rat cooks it into a brand-new "
                          "catalogue item and adds it straight to the game's catalogue.")
         self._fbx = None
+        self._queue = []            # items queued via "＋ add another" (multi-add)
 
         self._texture = None
         self._thumbnail = None
@@ -1242,6 +1243,20 @@ class AddInputPage(QWizardPage):
                 h.addWidget(w, stretch)
             return h
 
+        # Multi-add: queue several items and build them into the catalogue in ONE
+        # push — no reloading Pak Rat per item. Each queued row keeps its own model,
+        # name, price and thumbnail; the form clears for the next.
+        self.queue_btn = QPushButton("➕  Add another item to this batch")
+        self.queue_lbl = QLabel("")
+        self.queue_lbl.setStyleSheet("color:#3cc;")
+        self._qbox_host = QWidget()
+        self._qbox = QVBoxLayout(self._qbox_host)
+        self._qbox.setContentsMargins(0, 0, 0, 0)
+        qscroll = QScrollArea()
+        qscroll.setWidgetResizable(True)
+        qscroll.setWidget(self._qbox_host)
+        qscroll.setMaximumHeight(110)
+
         lay = QVBoxLayout(self)
         lay.addLayout(_row((self.pick_btn, 0), (self.pick_lbl, 1)))
         lay.addSpacing(6)
@@ -1258,6 +1273,9 @@ class AddInputPage(QWizardPage):
         lay.addLayout(_row((self.tex_btn, 0), (self.tex_lbl, 1)))
         lay.addLayout(_row((self.thumb_btn, 0), (self.thumb_lbl, 1)))
         lay.addSpacing(6)
+        lay.addLayout(_row((self.queue_btn, 0), (self.queue_lbl, 1)))
+        lay.addWidget(qscroll)
+        lay.addSpacing(4)
         lay.addWidget(self.reset_chk)
         lay.addStretch(1)
         lay.addWidget(note)
@@ -1265,12 +1283,17 @@ class AddInputPage(QWizardPage):
         self.pick_btn.clicked.connect(self._pick)
         self.tex_btn.clicked.connect(self._pick_texture)
         self.thumb_btn.clicked.connect(self._pick_thumbnail)
+        self.queue_btn.clicked.connect(self._queue_current)
         self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
 
     def initializePage(self):
         t = getattr(self.wizard(), "add_type", "Decoration")
-        self.setSubTitle(f"Adding a new {t}. Bring your own model — Pak Rat cooks it "
-                         "into a brand-new catalogue item and adds it straight to the game's catalogue.")
+        self.setSubTitle(f"Adding new {t} items. Fill one in, hit “Add another” to queue "
+                         "more, then Next builds the whole batch into the catalogue in one push.")
+        self._queue = []
+        self._clear_form()
+        self._refresh_queue()
+        self.completeChanged.emit()
 
     def _pick(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1298,8 +1321,79 @@ class AddInputPage(QWizardPage):
             self._thumbnail = path
             self.thumb_lbl.setText(_basename(path))
 
-    def isComplete(self):
+    def _item_name(self):
+        # Display name -> the item's in-catalogue title (Interface StringTable value).
+        # Keep it readable but ASCII-safe (relink stamps it as an ASCII FString).
+        return ("".join(c for c in self.name_edit.text()
+                        if c.isascii() and (c.isalnum() or c in " _-'")).strip()[:40]
+                or "Custom Item")
+
+    def _form_filled(self):
         return bool(self._fbx) and bool(self.name_edit.text().strip())
+
+    def _current_item(self):
+        """The form's item dict, or None if no model/name entered yet."""
+        if not self._form_filled():
+            return None
+        return {
+            "fbx": self._fbx,
+            "name": self._item_name(),
+            "category": getattr(self.wizard(), "add_category", "Decoration"),
+            "price": self._price(),
+            "texture": self._texture,
+            "thumbnail": self._thumbnail,
+        }
+
+    def _clear_form(self):
+        self._fbx = None
+        self._texture = None
+        self._thumbnail = None
+        self.pick_lbl.setText("No model selected.")
+        self.name_edit.clear()
+        self.price_edit.clear()
+        self.tex_lbl.setText("Skin swap is coming — bake the texture into your model.")
+        self.thumb_lbl.setText("Optional — reuses the base item's icon if left blank.")
+
+    def _queue_current(self):
+        it = self._current_item()
+        if not it:
+            QMessageBox.information(self, "Pak Rat",
+                                    "Pick a model and enter a name before adding another.")
+            return
+        self._queue.append(it)
+        self._clear_form()
+        self._refresh_queue()
+        self.completeChanged.emit()
+
+    def _refresh_queue(self):
+        while self._qbox.count():
+            w = self._qbox.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        for i, it in enumerate(self._queue):
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            price = f"  ${int(it['price'])}" if it.get("price") is not None else ""
+            lbl = QLabel(f"{i + 1}.  {it['name']}{price}")
+            rm = QPushButton("✕")
+            rm.setObjectName("rm")
+            rm.setFixedWidth(28)
+            rm.clicked.connect(lambda _=False, idx=i: self._remove_queued(idx))
+            h.addWidget(lbl, 1)
+            h.addWidget(rm)
+            self._qbox.addWidget(row)
+        n = len(self._queue)
+        self.queue_lbl.setText(f"{n} queued" if n else "")
+
+    def _remove_queued(self, idx):
+        if 0 <= idx < len(self._queue):
+            self._queue.pop(idx)
+            self._refresh_queue()
+            self.completeChanged.emit()
+
+    def isComplete(self):
+        return bool(self._queue) or self._form_filled()
 
     def _price(self):
         """Parse the price field -> float, or None (falls back to a default)."""
@@ -1310,19 +1404,16 @@ class AddInputPage(QWizardPage):
             return None
 
     def validatePage(self):
+        # The batch = everything queued, plus a filled-but-not-yet-queued form so a
+        # single item doesn't require clicking "Add another" first.
+        items = list(self._queue)
+        cur = self._current_item()
+        if cur:
+            items.append(cur)
+        if not items:
+            return False
         w = self.wizard()
-        w.add_items = [{
-            "fbx": self._fbx,
-            # Display name -> the item's in-catalogue title (Interface StringTable value).
-            # Keep it readable but ASCII-safe (relink stamps it as an ASCII FString).
-            "name": ("".join(c for c in self.name_edit.text()
-                             if c.isascii() and (c.isalnum() or c in " _-'")).strip()[:40]
-                     or "Custom Item"),
-            "category": getattr(self.wizard(), "add_category", "Decoration"),
-            "price": self._price(),
-            "texture": self._texture,
-            "thumbnail": self._thumbnail,
-        }]
+        w.add_items = items
         w.add_reset = self.reset_chk.isChecked()
         return True
 

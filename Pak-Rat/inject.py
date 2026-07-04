@@ -55,7 +55,6 @@ MOD_NAME = "PakRatInjector"
 # Snacks/Drinks/Toys have NO hookable function (their product list is a static data
 # array on a stock-box CDO — ToysBox/DrinkBox/ConcessionsShelf), so they stay gated.
 CONTENT_TYPES = [
-    {"key": "Shelves",    "category": "Container",   "mapped": True},
     {"key": "Decoration", "category": "Decoration",  "mapped": True},
     {"key": "Equipment",  "category": "Equipmement", "mapped": True},
     {"key": "Snacks",     "category": None,          "mapped": False},
