@@ -438,10 +438,28 @@ try:
     opt.import_materials = True; opt.import_textures = True
     opt.mesh_type_to_import = unreal.FBXImportType.FBXIT_STATIC_MESH
     opt.static_mesh_import_data.combine_meshes = True
+    opt.static_mesh_import_data.auto_generate_collision = True
     task = unreal.AssetImportTask()
     task.filename = FBX; task.destination_path = PKG; task.destination_name = NM
     task.replace_existing = True; task.automated = True; task.save = True; task.options = opt
     at.import_asset_tasks([task])
+    # The wall-placement ghost traces against the mesh's SIMPLE collision; without a
+    # clean collision volume it won't 'stick' to a wall. Force a box simple collision
+    # (flush against the wall) so arbitrary user meshes wall-mount like the poster.
+    # Non-fatal — a mesh that imports but can't take collision still cooks.
+    mesh = unreal.load_asset(PKG + "/" + NM)
+    if mesh is not None:
+        try:
+            sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+            try: sub.remove_collisions(mesh)
+            except Exception: pass
+            sub.add_simple_collisions(mesh, unreal.ScriptingCollisionShapeType.BOX)
+        except Exception:
+            try:
+                unreal.EditorStaticMeshLibrary.add_simple_collisions(
+                    mesh, unreal.ScriptingCollisionShapeType.BOX)
+            except Exception as e2:
+                note("COLLISION_WARN " + str(e2))
     unreal.EditorAssetLibrary.save_asset(PKG + "/" + NM, only_if_is_dirty=False)
     note("MESH_DONE " + PKG + "/" + NM)
 except Exception:
