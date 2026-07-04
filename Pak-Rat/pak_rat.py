@@ -1230,20 +1230,34 @@ class AddInputPage(QWizardPage):
         note.setWordWrap(True)
         note.setStyleSheet("color:#c08a2e; font-style:italic;")
 
+        # Inline each button with its status label, and share Name/Price on one row,
+        # so the page reads as ~6 compact rows instead of a tall squished column.
+        self.tex_lbl.setWordWrap(True)
+        self.thumb_lbl.setWordWrap(True)
+        self.price_edit.setMaximumWidth(160)
+
+        def _row(*parts):
+            h = QHBoxLayout()
+            for w, stretch in parts:
+                h.addWidget(w, stretch)
+            return h
+
         lay = QVBoxLayout(self)
-        lay.addWidget(self.pick_btn)
-        lay.addWidget(self.pick_lbl)
-        lay.addSpacing(8)
-        lay.addWidget(QLabel("Name"))
-        lay.addWidget(self.name_edit)
-        lay.addWidget(QLabel("Price"))
-        lay.addWidget(self.price_edit)
-        lay.addSpacing(8)
-        lay.addWidget(self.tex_btn)
-        lay.addWidget(self.tex_lbl)
-        lay.addWidget(self.thumb_btn)
-        lay.addWidget(self.thumb_lbl)
-        lay.addSpacing(8)
+        lay.addLayout(_row((self.pick_btn, 0), (self.pick_lbl, 1)))
+        lay.addSpacing(6)
+
+        name_price = QHBoxLayout()
+        name_price.addWidget(QLabel("Name"))
+        name_price.addWidget(self.name_edit, 1)
+        name_price.addSpacing(12)
+        name_price.addWidget(QLabel("Price"))
+        name_price.addWidget(self.price_edit, 0)
+        lay.addLayout(name_price)
+        lay.addSpacing(6)
+
+        lay.addLayout(_row((self.tex_btn, 0), (self.tex_lbl, 1)))
+        lay.addLayout(_row((self.thumb_btn, 0), (self.thumb_lbl, 1)))
+        lay.addSpacing(6)
         lay.addWidget(self.reset_chk)
         lay.addStretch(1)
         lay.addWidget(note)

@@ -285,13 +285,44 @@ def has_additions() -> bool:
 
 
 def reset_additions() -> None:
-    """Wipe the additions manifest so the next Add starts from a clean catalogue.
-    Fixes #5: the manifest is additive and replays EVERY past item into each
-    generated pak, so stale test entries showed up as extra catalogue items."""
+    """Wipe the additions manifest AND the persistent asset library so the next Add
+    starts from a genuinely clean catalogue (metadata + staged package files both go).
+    Fixes #5: the manifest is additive and replays EVERY past item into each generated
+    pak, so stale test entries showed up as extra catalogue items."""
     try:
         manifest_path().unlink()
     except FileNotFoundError:
         pass
+    shutil.rmtree(asset_library(), ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Persistent asset library — every added item's staged package files (the cloned
+# item .uasset/.uexp carrying its CDO, the cooked mesh, the custom thumbnail) are
+# kept here under their real pak-tree paths. Every Add then rebuilds ONE pak from
+# the WHOLE library and overwrites the previous one, so the catalogue extends
+# without bound and no earlier item is ever dropped. Without this store the pak
+# only held the newest run's files, so a second Add killed the first item's assets.
+# It lives in the writable Pak Rat home (LOCALAPPDATA/PakRat — survives app
+# updates, unlike the read-only _internal bundle); additions.ini is its index.
+# ---------------------------------------------------------------------------
+ADDITIONS_PAK = "zzz_PakRat_Additions_P.pak"   # fixed name -> each deploy overwrites
+
+
+def asset_library() -> Path:
+    d = cook.home() / "asset_library"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _merge_tree(src: Path, dst: Path) -> None:
+    """Copy every file under `src` into `dst`, preserving the relative pak-tree
+    layout. Overwrites same-path files; leaves unrelated files in `dst` intact."""
+    for p in src.rglob("*"):
+        if p.is_file():
+            out = dst / p.relative_to(src)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, out)
 
 
 # ---------------------------------------------------------------------------
@@ -615,10 +646,12 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
     Per item: cook the user's mesh, then RE-SERIALISE a fresh-identity clone of the
     type's exemplar pointing at that mesh. Then extract the vanilla catalogue widget
     and CHAIN-insert every manifest item's class into its product-class bytecode —
-    NATIVE registration, NO UE4SS/Lua. Packs the widget + all clones + meshes into ONE
-    V8B pak (path-string index, so brand-new package paths are discoverable). Manifest
-    is additive across runs (it drives the widget insert). Returns
-    {'pak': path, 'ini': path, 'items_by_cat': {...}}.
+    NATIVE registration, NO UE4SS/Lua. Each item's staged files are kept in a permanent
+    asset library (see asset_library) and EVERY run rebuilds ONE fixed-name V8B pak from
+    the whole library — widget + StringTable + all clones + meshes + thumbnails — then
+    overwrites the previous pak on deploy. So adds accumulate without bound and no earlier
+    item is dropped. Manifest is additive across runs (it drives the widget insert).
+    Returns {'pak': path, 'ini': path, 'items_by_cat': {...}}.
     """
     import tempfile
 
@@ -645,6 +678,15 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
             price=it.get("price"), texture=it.get("texture"),
             thumbnail=it.get("thumbnail"), progress=progress)
         built.append(entry)
+
+    # Persist THIS run's freshly-staged item files (mesh + CDO + thumbnail) into the
+    # permanent library, then pull the ENTIRE library back into the stage — so the pak
+    # we pack below carries every item ever added, not just this run's. This is what
+    # stops a second Add from dropping the first item's assets. (`stage` holds only the
+    # new items' files at this point; the widget + StringTable are staged further down.)
+    lib = asset_library()
+    _merge_tree(stage, lib)      # new items -> library (accumulate, unique paths)
+    _merge_tree(lib, stage)      # whole library -> stage (older items restored)
 
     # Merge new items into the manifest (additive) — it drives the widget insert.
     items_by_cat = existing
@@ -697,9 +739,10 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
     # Pack V8B (FNameBasedCompression, NO path-hash seed): required so genuinely NEW
     # package paths are discoverable by the loader (V11's path-hash index is not).
     say("Packaging .pak (V8B)…", None)
-    label = ("".join(c for c in built[0]["name"] if c.isalnum()) or "Item") + \
-            (f"_plus{len(built) - 1}" if len(built) > 1 else "")
-    out_pak = work / f"zzz_PakRat_Add_{label}_P.pak"
+    # ONE fixed-name pak for all additions — deploy copies it by basename, so each
+    # rebuild overwrites the previous pak in ~mods instead of piling up conflicting
+    # catalogue widgets. Extend-in-place = unlimited add-ons.
+    out_pak = work / ADDITIONS_PAK
     core._repak("pack", "--version", core.MESH_PAK_VERSION, "--mount-point",
                 core.PAK_MOUNT, str(stage), str(out_pak))
 
