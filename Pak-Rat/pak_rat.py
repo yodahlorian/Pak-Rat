@@ -1862,7 +1862,20 @@ class PipelineWorker(QThread):
                          for tex, img in self.tex_items.items()]
                 pak = core.run_pipeline_multi(items, progress=self.status.emit)
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
+            # Capture the FULL chain (traceback walks __cause__), so an opaque
+            # top-level message — e.g. pythonnet's "Failed to create a .NET
+            # runtime (coreclr) using the parameters {}" — never buries the real
+            # fault. Persist it next to the cook logs for post-mortem on machines
+            # we can't attach a debugger to.
+            import traceback
+            detail = traceback.format_exc()
+            try:
+                log = cook.home() / "last_build.log"
+                log.write_text(detail, encoding="utf-8")
+                where = f"\n\nFull details written to:\n{log}"
+            except Exception:  # noqa: BLE001
+                where = ""
+            self.failed.emit(f"{e}{where}")
         else:
             self.done.emit(pak)
 

@@ -38,16 +38,18 @@ _T: dict = {}          # resolved .NET types, filled by _ensure()
 def _dotnet_root() -> str | None:
     """Locate a .NET 8 runtime for pythonnet to host.
 
-    Order: an explicit DOTNET_ROOT; the runtime we bundle in standard layout
-    under vendor/dotnet (shipping); the dev-box install in LOCALAPPDATA. Returns
-    a Windows path string, or None to let clr_loader use the default resolution.
+    Order: the runtime we bundle under vendor/dotnet (self-contained — this is
+    what ships, so it must win over ambient machine state; a stray DOTNET_ROOT or
+    a system install must not hijack hosting); then an explicit DOTNET_ROOT; then
+    the dev-box install in LOCALAPPDATA. Returns a Windows path string, or None to
+    let clr_loader fall back to its own discovery.
     """
+    bundled = core.VENDOR("dotnet")                      # shipping layout — wins
+    if (bundled / "host").exists():
+        return str(bundled)
     env = os.environ.get("DOTNET_ROOT")
     if env and Path(env).exists():
         return env
-    bundled = core.VENDOR("dotnet")                      # shipping layout (task: vendor restructure)
-    if (bundled / "host").exists():
-        return str(bundled)
     local = os.environ.get("LOCALAPPDATA")
     if local:
         dev = Path(local) / "Microsoft" / "dotnet"       # dev install
@@ -56,16 +58,51 @@ def _dotnet_root() -> str | None:
     return None
 
 
+def _host_coreclr(root: str | None) -> None:
+    """Host coreclr, pinned to the bundled runtime whenever we have one.
+
+    Passing clr_loader an explicit DotnetCoreRuntimeSpec makes it skip its own
+    runtime discovery — which otherwise consults the `dotnet` CLI / PATH / the
+    machine's registered runtimes — so hosting depends ONLY on the runtime we
+    ship, never on ambient machine state. (That discovery is why the same build
+    ran on a dev box yet died on a clean machine.)
+
+    pythonnet re-wraps any failure as an opaque "Failed to create a .NET runtime
+    (coreclr) using the parameters {}" and callers upstream only kept str(e), so
+    the true fault was invisible. Here we unwrap the chained __cause__ and raise
+    it verbatim, so a missing/quarantined file, access-denied, bad-image, or
+    missing-UCRT error actually reaches the user and the log.
+    """
+    from pythonnet import load, set_runtime
+    try:
+        if root:
+            os.environ["DOTNET_ROOT"] = root
+            from clr_loader import DotnetCoreRuntimeSpec, get_coreclr
+            fw = Path(root) / "shared" / "Microsoft.NETCore.App"
+            vers = sorted(
+                (p.name for p in fw.iterdir() if p.is_dir() and p.name[:1].isdigit()),
+                key=lambda v: tuple(int(x) for x in v.split("-")[0].split(".")),
+            )
+            if not vers:
+                raise RuntimeError(f"no Microsoft.NETCore.App framework under {fw}")
+            ver = vers[-1]
+            spec = DotnetCoreRuntimeSpec("Microsoft.NETCore.App", ver, fw / ver)
+            set_runtime(get_coreclr(dotnet_root=root, runtime_spec=spec))
+        load("coreclr")   # honours a pinned runtime; else clr_loader self-discovers
+    except Exception as exc:                              # noqa: BLE001
+        cause = exc.__cause__ or exc
+        raise RuntimeError(
+            f"Failed to host the .NET 8 runtime (root={root!r}). "
+            f"Underlying cause — {type(cause).__name__}: {cause}"
+        ) from exc
+
+
 def _ensure() -> None:
     """Idempotently host the CLR and import the UAssetAPI types we need."""
     global _LOADED
     if _LOADED:
         return
-    root = _dotnet_root()
-    if root:
-        os.environ["DOTNET_ROOT"] = root
-    from pythonnet import load
-    load("coreclr")
+    _host_coreclr(_dotnet_root())
     import clr  # noqa: F401  (activates the CLR import hook)
     clr.AddReference(str(core.VENDOR("relink", "UAssetAPI.dll")))
 
