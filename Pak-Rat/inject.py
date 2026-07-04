@@ -367,8 +367,14 @@ def save_pak_name(name: str) -> None:
 #   self_path / class_token / mesh_path / mesh_name are the exact strings we swap.
 #   `asset` len sets the item-token length; `mesh_name` len sets the mesh-token length.
 MESH_ROOT = "/Game/VideoStore/asset/meshes"
+# Real, in-game LOADABLE items we clone — now keyed by exemplar id (the user picks
+# which base on the Exemplar page). `placement` splits floor vs wall-mounted so a
+# model can be added either way. `cdo_title_key` BYTE LENGTH sets the added item's
+# token length so relink.setcdo stays length-neutral (no CDO shift -> no price-0 /
+# blank-thumb / crash regression). All paths verified against the base pak.
 EXEMPLARS = {
-    "Decoration": {
+    "couch": {
+        "id": "couch", "label": "Couch", "placement": "floor",
         "category": "Decoration",
         "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/decoration/Couch",
         "asset": "Couch",
@@ -376,19 +382,43 @@ EXEMPLARS = {
         "class_token": "Couch_C",
         "mesh_path": "/Game/VideoStore/asset/meshes/LA_Chair_A_01",
         "mesh_name": "LA_Chair_A_01",
-        # The CDO's inline localisation title-key. Its BYTE LENGTH sets the added
-        # item's token length so relink.setcdo stays length-neutral (no CDO shift
-        # -> no price-0 / blank-thumb / crash regression). See relink.setcdo.
-        "cdo_title_key": "Interface_Product_Decoration_Couch",   # 34 chars
-        # Catalogue thumbnail texture (a T_*_T in the item's own folder). Renamed by
-        # clone + reskinned with the user's image when a custom thumbnail is given.
+        "cdo_title_key": "Interface_Product_Decoration_Couch",
         "thumb_path": "/Game/VideoStore/asset/prop/decoration/Couch/T_Decoration_Couch_T",
         "thumb_name": "T_Decoration_Couch_T",
         "default_price": 100.0,
     },
-    # Shelves/Equipment: add their own exemplar (a real shelf / fridge) once the
-    # Decoration clone path is confirmed in-game; the machinery below is generic.
+    "movie_wall": {
+        "id": "movie_wall", "label": "Movie Display (wall-mounted)", "placement": "wall",
+        "category": "Decoration",
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/decoration/Movie-Display",
+        "asset": "Shelf_Movie-Display_WallMounted_01",
+        "self_path": ("/Game/VideoStore/asset/prop/decoration/Movie-Display/"
+                      "Shelf_Movie-Display_WallMounted_01"),
+        "class_token": "Shelf_Movie-Display_WallMounted_01_C",
+        "mesh_path": "/Game/VideoStore/asset/meshes/LA_DisplayWall_Movie_A_01",
+        "mesh_name": "LA_DisplayWall_Movie_A_01",
+        "cdo_title_key": "Interface_Product_Shelf_MovieDisplay-WallMounted",
+        "thumb_path": ("/Game/VideoStore/asset/prop/decoration/Movie-Display/"
+                       "T_Decoration_Shelf_Movie-Display_WallMounted_01_T"),
+        "thumb_name": "T_Decoration_Shelf_Movie-Display_WallMounted_01_T",
+        "default_price": 100.0,
+    },
 }
+
+DEFAULT_EXEMPLAR = {"Decoration": "couch"}
+
+
+def exemplars_for(category: str) -> list[dict]:
+    """Base items the user can clone for a given content category."""
+    return [e for e in EXEMPLARS.values() if e["category"] == category]
+
+
+def get_exemplar(exemplar_id: str | None, category: str = "Decoration") -> dict:
+    """Resolve the chosen exemplar id, falling back to the category default / first."""
+    if exemplar_id and exemplar_id in EXEMPLARS:
+        return EXEMPLARS[exemplar_id]
+    lst = exemplars_for(category)
+    return lst[0] if lst else EXEMPLARS["couch"]
 
 # Length of the fixed affixes around the item token in the CDO title-key
 # ("Interface_ModKit_" + <token> + "_Title"). Token length = key length - this.
@@ -566,13 +596,14 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
 def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
                      category: str, index: int, stage: Path,
                      price: float | None = None, texture: str | None = None,
-                     thumbnail: str | None = None, progress=None) -> dict:
+                     thumbnail: str | None = None, progress=None,
+                     exemplar: str | None = None) -> dict:
     """Cook the user's mesh + clone the type's exemplar to point at it, then stamp
     the item's CDO (custom name key + price) LENGTH-NEUTRALLY. Optional `thumbnail`
     gives a custom catalogue icon (best-effort; falls back to the default icon).
     `texture` (mesh skin) is deferred — bake it into the model. Returns the manifest
     entry {pkg, cls, name, category, price}."""
-    ex = EXEMPLARS.get(category) or EXEMPLARS["Decoration"]
+    ex = get_exemplar(exemplar, category)
     item, mesh = _slot_tokens(ex, index)
     if _cook_user_mesh(env, fbx, mesh, stage, progress=progress) == 0:
         raise RuntimeError(
@@ -701,7 +732,8 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
             env, it["fbx"], it.get("name") or f"PakRatItem{i}",
             it.get("category", "Decoration"), base_index + i, stage,
             price=it.get("price"), texture=it.get("texture"),
-            thumbnail=it.get("thumbnail"), progress=progress)
+            thumbnail=it.get("thumbnail"), progress=progress,
+            exemplar=it.get("exemplar"))
         built.append(entry)
 
     # Persist THIS run's freshly-staged item files (mesh + CDO + thumbnail) into the

@@ -43,7 +43,8 @@ import inject  # noqa: E402  (v3 "Add Asset" runtime injection engine)
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
-    PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY = range(17)
+    PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY, \
+    PAGE_ADDEXEMPLAR = range(18)
 
 APP_VERSION = core.APP_VERSION   # single source of truth lives in core.py
 
@@ -1189,11 +1190,70 @@ class AddCategoryPage(QWizardPage):
         return True
 
     def nextId(self):
+        return PAGE_ADDEXEMPLAR
+
+
+# ---------------------------------------------------------------------------
+# Add-asset step 1b (v3) — choose WHICH base item to clone (floor vs wall-mounted).
+# ---------------------------------------------------------------------------
+class ExemplarPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Floor or wall-mounted?")
+        self.setSubTitle("Pick the base item your model clones. Floor items sit on the "
+                         "ground; wall-mounted items hang on a wall.")
+        self.group = QButtonGroup(self)
+        self._radios = []
+        self._lay = QVBoxLayout(self)
+        self._note = QLabel("")
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet("color:#888;")
+
+    def initializePage(self):
+        # rebuild the option list for the chosen category
+        for rb in self._radios:
+            self.group.removeButton(rb)
+            rb.deleteLater()
+        self._radios = []
+        # clear any stale layout rows (keep nothing — fully rebuilt each entry)
+        while self._lay.count():
+            it = self._lay.takeAt(0)
+            w = it.widget()
+            if w and w is not self._note:
+                w.deleteLater()
+        cat = getattr(self.wizard(), "add_category", "Decoration")
+        exs = inject.exemplars_for(cat) or inject.exemplars_for("Decoration")
+        for i, ex in enumerate(exs):
+            tag = {"floor": "🛋  Floor", "wall": "🖼  Wall-mounted"}.get(
+                ex.get("placement"), "Item")
+            rb = QRadioButton(f"{tag} — {ex['label']}")
+            rb.setProperty("exid", ex["id"])
+            self.group.addButton(rb, i)
+            self._lay.addWidget(rb)
+            self._radios.append(rb)
+            if i == 0:
+                rb.setChecked(True)
+        self._lay.addStretch(1)
+        self._lay.addWidget(self._note)
+        self.completeChanged.emit()
+
+    def _selected(self):
+        b = self.group.checkedButton()
+        return b.property("exid") if b else None
+
+    def isComplete(self):
+        return self._selected() is not None
+
+    def validatePage(self):
+        self.wizard().add_exemplar = self._selected()
+        return True
+
+    def nextId(self):
         return PAGE_ADDINPUT
 
 
 # ---------------------------------------------------------------------------
-# Add-asset step 2 (v3) — pick a model, name it. (Category chosen on step 1.)
+# Add-asset step 2 (v3) — pick a model, name it. (Category + base chosen earlier.)
 # ---------------------------------------------------------------------------
 class AddInputPage(QWizardPage):
     def __init__(self):
@@ -1339,6 +1399,7 @@ class AddInputPage(QWizardPage):
             "fbx": self._fbx,
             "name": self._item_name(),
             "category": getattr(self.wizard(), "add_category", "Decoration"),
+            "exemplar": getattr(self.wizard(), "add_exemplar", None),
             "price": self._price(),
             "texture": self._texture,
             "thumbnail": self._thumbnail,
@@ -2655,6 +2716,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_COMBINESRC, CombineSourcePage())
         self.setPage(PAGE_COMBINESEL, CombineSelectPage())
         self.setPage(PAGE_ADDCATEGORY, AddCategoryPage())
+        self.setPage(PAGE_ADDEXEMPLAR, ExemplarPage())
         self.setPage(PAGE_ADDINPUT, AddInputPage())
         self.setStartId(PAGE_MODE)
 
