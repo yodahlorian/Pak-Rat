@@ -21,12 +21,16 @@ from pathlib import Path
 
 import core
 
-# ui format -> (CUE4Parse EMeshFormat, output ext, produced-via-Blender-from-glb)
+# ui format -> output extension. Geometry is always exported from CUE4Parse as
+# UEFormat (.uemodel) — proven robust, no glTF/SkiaSharp export path — then FBX/OBJ/
+# glTF are produced by importing that .uemodel in the vendored Blender via the
+# UEFormat addon (the SAME importer the Add-Asset uemodel path uses, confirmed to
+# work in-game) and re-exporting. `blender_ext` None => hand the .uemodel back as-is.
 FORMATS = {
-    "uemodel": ("UEFormat", ".uemodel", False),
-    "gltf":    ("Gltf2",    ".glb",     False),
-    "fbx":     ("Gltf2",    ".fbx",     True),
-    "obj":     ("Gltf2",    ".obj",     True),
+    "uemodel": None,      # direct, no Blender
+    "fbx":     ".fbx",
+    "obj":     ".obj",
+    "gltf":    ".glb",
 }
 GEOMETRY_FORMATS = ("uasset",) + tuple(FORMATS)   # "uasset" = raw cooked (no reader)
 
@@ -102,26 +106,34 @@ def _load_static_mesh(mount: str):
     raise RuntimeError(f"no StaticMesh export found in '{mount}'")
 
 
-def _blender_glb_convert(glb: str, out: str, progress=None) -> None:
-    """Import a .glb in the vendored Blender and export it as FBX or OBJ."""
+def _blender_uemodel_convert(uemodel: str, out: str, progress=None) -> None:
+    """Import a .uemodel in the vendored Blender (UEFormat addon — the same importer
+    the Add-Asset uemodel path uses) and re-export it as FBX / OBJ / glTF."""
     import cook
     bl = cook.ensure_blender(progress)
     script = cook.home() / "_meshx_convert.py"
-    script.write_text(_GLB_CONVERT_SCRIPT, encoding="utf-8")
-    r = core._run([bl, "--background", "--python", str(script), "--", glb, out])
+    script.write_text(_UEMODEL_CONVERT_SCRIPT, encoding="utf-8")
+    addons = str(core.VENDOR("blender_addons"))
+    r = core._run([bl, "--background", "--python", str(script),
+                   "--", uemodel, out, addons])
     if not os.path.isfile(out):
-        raise RuntimeError("Blender glb->mesh conversion failed:\n%s"
-                           % (r.stderr or r.stdout))
+        raise RuntimeError("Blender uemodel->mesh conversion failed:\n%s"
+                           % ((r.stderr or r.stdout or "")[-800:]))
 
 
-_GLB_CONVERT_SCRIPT = r'''
+_UEMODEL_CONVERT_SCRIPT = r'''
 import bpy, sys
-glb, out = sys.argv[-2], sys.argv[-1]
+uemodel, out, addons = sys.argv[-3], sys.argv[-2], sys.argv[-1]
 bpy.ops.wm.read_factory_settings(use_empty=True)
-bpy.ops.import_scene.gltf(filepath=glb)
+sys.path.insert(0, addons)
+from io_scene_ueformat.importer.logic import UEFormatImport
+from io_scene_ueformat.options import UEModelOptions
+UEFormatImport(UEModelOptions()).import_file(uemodel)
 e = out.lower().rsplit(".", 1)[-1]
 if e == "obj":
-    bpy.ops.wm.obj_export(filepath=out, export_selected_objects=False)
+    bpy.ops.wm.obj_export(filepath=out)
+elif e in ("gltf", "glb"):
+    bpy.ops.export_scene.gltf(filepath=out, export_format="GLB")
 else:  # fbx
     bpy.ops.export_scene.fbx(filepath=out, use_selection=False,
         object_types={"MESH"}, add_leaf_bones=False, path_mode="COPY")
@@ -132,12 +144,13 @@ print("PAKRAT_MESHX", out)
 def export_mesh(mount: str, dest_dir: str, fmt: str, progress=None) -> list[str]:
     """Extract the cooked StaticMesh at `mount` into `dest_dir/<leaf>/` as `fmt`.
 
-    fmt in FORMATS ('uemodel'|'gltf'|'fbx'|'obj'). Returns the written file paths.
-    uemodel/gltf are handed back with their textures; fbx/obj are converted from
-    the glb via Blender. Raises on failure (caller skips + reports per asset).
+    fmt in FORMATS ('uemodel'|'fbx'|'obj'|'gltf'). Geometry is exported from
+    CUE4Parse as .uemodel (robust); for other formats that .uemodel is re-exported
+    through the vendored Blender/UEFormat addon. The mesh's textures are carried
+    alongside. Returns written paths; raises on failure (caller skips + reports).
     """
     fmt = fmt.lower()
-    mformat, ext, via_blender = FORMATS[fmt]
+    ext = FORMATS[fmt]
     leaf = mount.rstrip("/").split("/")[-1]
     if progress:
         progress(f"Reading {leaf} ({fmt})…")
@@ -151,37 +164,35 @@ def export_mesh(mount: str, dest_dir: str, fmt: str, progress=None) -> list[str]
     stage = tempfile.mkdtemp(prefix="pakrat_meshx_")
     try:
         opts = ExporterOptions()
-        opts.MeshFormat = getattr(EMeshFormat, mformat)
+        opts.MeshFormat = EMeshFormat.UEFormat        # always uemodel from CUE4Parse
         MeshExporter(sm, opts).TryWriteToDir(DirectoryInfo(stage))
 
-        primary = None
+        uemodel = None
         for f in glob.glob(os.path.join(stage, "**", "*"), recursive=True):
-            if os.path.isfile(f) and f.lower().endswith((".glb", ".uemodel")):
-                primary = f
-        if not primary:
-            raise RuntimeError(f"exporter produced no mesh file for '{leaf}'")
+            if os.path.isfile(f) and f.lower().endswith(".uemodel"):
+                uemodel = f
+        if not uemodel:
+            raise RuntimeError(f"CUE4Parse produced no .uemodel for '{leaf}'")
 
         out_dir = os.path.join(dest_dir, leaf)
         os.makedirs(out_dir, exist_ok=True)
         written = []
-        if via_blender:
-            out = os.path.join(out_dir, leaf + ext)
-            if progress:
-                progress(f"Converting {leaf} → {fmt.upper()}…")
-            _blender_glb_convert(primary, out, progress=progress)
-            written.append(out)
-            # carry the textures alongside the converted mesh
-            for f in glob.glob(os.path.join(stage, "*.png")):
-                dst = os.path.join(out_dir, os.path.basename(f))
-                shutil.copy2(f, dst)
-                written.append(dst)
-        else:
-            # hand back the mesh + its textures/materials as-is
+        if ext is None:            # uemodel — hand back the mesh + its textures as-is
             for f in glob.glob(os.path.join(stage, "**", "*"), recursive=True):
                 if os.path.isfile(f):
                     dst = os.path.join(out_dir, os.path.basename(f))
                     shutil.copy2(f, dst)
                     written.append(dst)
+        else:                      # fbx/obj/gltf — convert the uemodel via Blender
+            out = os.path.join(out_dir, leaf + ext)
+            if progress:
+                progress(f"Converting {leaf} → {fmt.upper()}…")
+            _blender_uemodel_convert(uemodel, out, progress=progress)
+            written.append(out)
+            for f in glob.glob(os.path.join(stage, "*.png")):   # carry textures along
+                dst = os.path.join(out_dir, os.path.basename(f))
+                shutil.copy2(f, dst)
+                written.append(dst)
         return written
     finally:
         shutil.rmtree(stage, ignore_errors=True)
