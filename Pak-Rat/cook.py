@@ -42,7 +42,8 @@ import core  # reuse repak helpers, base-pak discovery, ref scanner, deploy
 BLENDER_URL = "https://download.blender.org/release/Blender4.2/blender-4.2.9-windows-x64.zip"
 
 # Mesh source formats we accept (Blender converts non-FBX → FBX for UE import)
-MESH_SOURCE_EXTS = {".fbx", ".obj", ".gltf", ".glb", ".stl", ".ply", ".dae", ".blend"}
+MESH_SOURCE_EXTS = {".fbx", ".obj", ".gltf", ".glb", ".stl", ".ply", ".dae",
+                    ".blend", ".uemodel"}
 
 PROJECT_NAME = "RetroRewind"  # must match the game's content mount
 
@@ -498,8 +499,9 @@ def convert_to_fbx(env: CookEnv, src: str, progress=None) -> str:
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     script = home() / "_convert.py"
     script.write_text(_CONVERT_SCRIPT, encoding="utf-8")
+    addons = str(core.VENDOR("blender_addons"))     # vendored UEFormat + zstandard
     r = core._run([env.blender_exe, "--background", "--python", str(script),
-                   "--", src, out])
+                   "--", src, out, addons])
     if not os.path.isfile(out):
         raise RuntimeError("Blender conversion failed:\n%s" % (r.stderr or r.stdout))
     return out
@@ -507,10 +509,18 @@ def convert_to_fbx(env: CookEnv, src: str, progress=None) -> str:
 
 _CONVERT_SCRIPT = r'''
 import bpy, sys
-src, out = sys.argv[-2], sys.argv[-1]
+src, out, addons = sys.argv[-3], sys.argv[-2], sys.argv[-1]
 bpy.ops.wm.read_factory_settings(use_empty=True)
 e = src.lower().rsplit(".", 1)[-1]
-if   e == "obj":            bpy.ops.wm.obj_import(filepath=src)
+if   e == "uemodel":
+    # FModel / UEFormat export. Call the vendored UEFormat importer directly (no
+    # addon registration needed); zstandard is vendored alongside for ZSTD files.
+    # scale_factor 0.01 = UEFormat's own default (UE cm -> Blender m).
+    sys.path.insert(0, addons)
+    from io_scene_ueformat.importer.logic import UEFormatImport
+    from io_scene_ueformat.options import UEModelOptions
+    UEFormatImport(UEModelOptions()).import_file(src)
+elif e == "obj":            bpy.ops.wm.obj_import(filepath=src)
 elif e in ("gltf", "glb"):  bpy.ops.import_scene.gltf(filepath=src)
 elif e == "stl":            bpy.ops.wm.stl_import(filepath=src)
 elif e == "ply":            bpy.ops.wm.ply_import(filepath=src)

@@ -1298,7 +1298,7 @@ class AddInputPage(QWizardPage):
     def _pick(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Choose a 3D model", "",
-            "3D models (*.fbx *.obj *.gltf *.glb *.stl *.ply *.dae *.blend);;All files (*)")
+            "3D models (*.fbx *.obj *.gltf *.glb *.stl *.ply *.dae *.blend *.uemodel);;All files (*)")
         if path:
             self._fbx = path
             self.pick_lbl.setText(_basename(path))
@@ -1425,7 +1425,7 @@ class AddInputPage(QWizardPage):
 # Cook list page — one pak, many meshes. Seeds the picked mesh, smart-detects
 # sibling parts (e.g. fishbowl → bowl/base/water), and lets you add more.
 # ---------------------------------------------------------------------------
-_MESH_FILTER = ("3D models (*.fbx *.obj *.gltf *.glb *.stl *.ply *.dae *.blend);;"
+_MESH_FILTER = ("3D models (*.fbx *.obj *.gltf *.glb *.stl *.ply *.dae *.blend *.uemodel);;"
                 "All files (*)")
 
 
@@ -1434,7 +1434,7 @@ class CookListPage(QWizardPage):
         super().__init__()
         self.setTitle("Choose your 3D model(s)")
         self.setSubTitle("One pak can hold several meshes. "
-                         "FBX / OBJ / glTF / GLB / STL / PLY / DAE / .blend.")
+                         "FBX / OBJ / glTF / GLB / STL / PLY / DAE / .blend / .uemodel.")
         self._rows = []
         self._stretch_added = False
 

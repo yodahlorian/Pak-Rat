@@ -534,6 +534,9 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
         log.unlink()
     except Exception:
         pass
+    # Normalise ANY non-FBX source (incl. .uemodel from FModel) to FBX via Blender
+    # before the UE import — UE's importer only reads FBX/OBJ. Pass-through for .fbx.
+    fbx = cook.convert_to_fbx(env, fbx, progress=progress)
     script = cook.project_dir() / "pakrat_mesh_import.py"
     script.write_text(_MESH_COOK_SCRIPT % {
         "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token},
