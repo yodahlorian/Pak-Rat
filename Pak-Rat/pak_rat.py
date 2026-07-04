@@ -2176,6 +2176,15 @@ class ExtractListPage(QWizardPage):
         self.fmt.addItem("DDS — exact format + mips (for re-injection)", "dds")
         self.fmt.setMaximumWidth(360)
 
+        # Mesh geometry export — the actual model, not just the cooked .uasset.
+        self.mesh_fmt = QComboBox()
+        self.mesh_fmt.addItem("uemodel — re-importable, no extra tools", "uemodel")
+        self.mesh_fmt.addItem("FBX — universal (converted via Blender)", "fbx")
+        self.mesh_fmt.addItem("OBJ — simple geometry (via Blender)", "obj")
+        self.mesh_fmt.addItem("glTF (.glb)", "gltf")
+        self.mesh_fmt.addItem("Keep raw cooked .uasset", "uasset")
+        self.mesh_fmt.setMaximumWidth(360)
+
         self.folder_btn = QPushButton("Save to…")
         self.folder_btn.clicked.connect(self._pick_folder)
         self.folder_lbl = QLabel("")
@@ -2188,12 +2197,17 @@ class ExtractListPage(QWizardPage):
         lay = QVBoxLayout(self)
         lay.addWidget(scroll)
         lay.addWidget(self.add_btn)
-        lay.addWidget(QLabel("Texture export format  (meshes are handed back as .uasset):"))
+        lay.addWidget(QLabel("Texture export format:"))
         lay.addWidget(self.fmt)
+        lay.addWidget(QLabel("Mesh export format:"))
+        lay.addWidget(self.mesh_fmt)
         lay.addLayout(folder_row)
 
     def selected_format(self) -> str:
         return self.fmt.currentData() or "png"
+
+    def selected_mesh_format(self) -> str:
+        return self.mesh_fmt.currentData() or "uemodel"
 
     def selected_assets(self):
         return [r["mount"] for r in self._rows if r["cb"].isChecked()]
@@ -2306,16 +2320,18 @@ class ExtractSaveWorker(QThread):
     done = Signal(list)        # written file paths
     failed = Signal(str)
 
-    def __init__(self, assets, dest, fmt):
+    def __init__(self, assets, dest, fmt, mesh_fmt="uasset"):
         super().__init__()
         self.assets = assets
         self.dest = dest
         self.fmt = fmt
+        self.mesh_fmt = mesh_fmt
 
     def run(self):
         try:
             written = core.export_assets(self.assets, self.dest, self.fmt,
-                                         progress=self.status.emit)
+                                         progress=self.status.emit,
+                                         mesh_fmt=self.mesh_fmt)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
         else:
@@ -2346,7 +2362,8 @@ class ExtractProgressPage(QWizardPage):
         page = wiz.page(PAGE_EXTRACTLIST)
         self.worker = ExtractSaveWorker(page.selected_assets(),
                                         getattr(wiz, "extract_dest", ""),
-                                        page.selected_format())
+                                        page.selected_format(),
+                                        page.selected_mesh_format())
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self._on_done)
         self.worker.failed.connect(self._on_fail)

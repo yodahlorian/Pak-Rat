@@ -6,7 +6,7 @@ a = Analysis(
     pathex=['Pak-Rat'],
     binaries=[],
     datas=[('Pak-Rat/Pak-Rat.ico', '.'), ('Pak-Rat/Pak-Rat.png', '.'), ('Pak-Rat/vendor', 'vendor')],
-    hiddenimports=['core', 'cook', 'inject', 'relink', 'PIL.Image',
+    hiddenimports=['core', 'cook', 'inject', 'relink', 'extract_mesh', 'PIL.Image',
                    'pythonnet', 'clr', 'clr_loader'],
     hookspath=[],
     hooksconfig={},

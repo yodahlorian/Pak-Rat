@@ -25,7 +25,7 @@ from pathlib import Path
 # Single source of truth for the app version — pak_rat.py (APP_VERSION) and
 # inject.py (manifest 'version') both read this so the build can't label itself
 # an older beta again (#2: exe reported b6 while shipping b8).
-APP_VERSION = "3.0.0-beta19"
+APP_VERSION = "3.0.0-beta20"
 
 UE_VERSION = "5.4"           # RR is UE 5.4 (verified via injector 'check')
 PAK_VERSION = "V11"
@@ -568,11 +568,13 @@ def related_assets(asset: str, limit: int = 16) -> list[str]:
 
 
 def export_assets(assets: list[str], dest_dir: str, fmt: str = "png",
-                  progress=None) -> list[str]:
+                  progress=None, mesh_fmt: str = "uasset") -> list[str]:
     """Extract several assets to dest_dir. Textures are decoded to `fmt`
-    (PNG/DDS); meshes (and anything else) are handed back as their raw cooked
-    sidecars (.uasset/.uexp/.ubulk), flattened to dest_dir/<leaf>.<ext>. Skips
-    failures so one bad asset can't sink the batch. Returns written paths."""
+    (PNG/DDS). Meshes are exported as geometry per `mesh_fmt`
+    (uemodel/fbx/obj/gltf via CUE4Parse) unless mesh_fmt == 'uasset', in which
+    case they (and anything else) are handed back as their raw cooked sidecars
+    (.uasset/.uexp/.ubulk). Skips failures so one bad asset can't sink the batch.
+    Returns written paths."""
     written = []
     Path(dest_dir).mkdir(parents=True, exist_ok=True)
     ensure_oodle()
@@ -581,6 +583,11 @@ def export_assets(assets: list[str], dest_dir: str, fmt: str = "png",
         if progress:
             progress(f"Extracting {leaf}  ({i}/{len(assets)})…")
         try:
+            if _classify(asset) == "mesh" and mesh_fmt and mesh_fmt != "uasset":
+                import extract_mesh
+                written += extract_mesh.export_mesh(asset, dest_dir, mesh_fmt,
+                                                    progress=progress)
+                continue
             if _classify(asset) == "texture":
                 spec = None
                 try:
