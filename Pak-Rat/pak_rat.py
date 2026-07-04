@@ -1382,14 +1382,23 @@ class AddInputPage(QWizardPage):
             return False
 
     def _apply_base_gate(self):
-        # keep_mesh bases (equipment: arcade/pinball) clone the whole vanilla
-        # machine — no user model or skin needed — so hide the model + texture
-        # pickers and drop the model requirement. Everything else keeps them.
+        # keep_mesh bases (equipment: arcade/pinball) clone the whole vanilla machine
+        # — no user MODEL — so hide the model picker and drop its requirement. They DO
+        # take an optional body/colour texture, so the texture picker stays (relabelled).
         km = self._base_keep_mesh()
-        for w in (self.pick_btn, self.pick_lbl, self.tex_btn, self.tex_lbl):
-            w.setVisible(not km)
+        self.pick_btn.setVisible(not km)
+        self.pick_lbl.setVisible(not km)
         if km:
-            self.pick_lbl.setText("Cloned from the base machine — no model needed.")
+            self.tex_btn.setText("Choose a colour / skin texture…")
+            self.tex_lbl.setText("Optional — recolours this machine; blank keeps the "
+                                 "vanilla skin.")
+        else:
+            self.tex_btn.setText("Choose a texture (model skin)…")
+            self.tex_lbl.setText("Skin swap is coming — for now, bake the texture into "
+                                 "your model. (This picker is a no-op this build.)")
+        self.tex_lbl.setStyleSheet("color:#888;")
+        self.tex_btn.setVisible(True)
+        self.tex_lbl.setVisible(True)
         self.completeChanged.emit()
 
     def _pick(self):

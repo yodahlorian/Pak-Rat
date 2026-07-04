@@ -431,6 +431,23 @@ EXEMPLARS = {
         "thumb_name": "T_Arcade_01_T",
         "default_price": 100.0,
         "widget_sibling": "Pinball-Machine_A_C",
+        # setcdo swaps this vanilla title key (len 40) for Interface_ModKit_<item>_Title
+        # of the SAME byte length -> item token = 40 - 23 = 17 chars (length-neutral).
+        "cdo_title_key": "Interface_Statistic-LevelUp_Arcade_Title",
+        # Body/colour reskin (Arcade_D recipe): the body base-colour texture the two
+        # colour MIs sample. Repointing the cloned MIs to a fresh copy recolours only
+        # this new machine (additive). The screen (VideoClips) is SKU/BP-driven, not
+        # in an MI — so an optional screen picker is best-effort file-copy only.
+        "body_texture": {
+            "path": "/Game/VideoStore/asset/textures/T_Arcade_A_01/T_Arcade_A_01_bc",
+            "name": "T_Arcade_A_01_bc",
+        },
+        "color_materials": [
+            {"path": "/Game/VideoStore/asset/textures/T_Arcade_A_01/MI_Arcade_A_01",
+             "name": "MI_Arcade_A_01", "body": True},
+            {"path": "/Game/VideoStore/asset/textures/T_Arcade_A_01/MI_Arcade_A_02",
+             "name": "MI_Arcade_A_02", "body": False},
+        ],
     },
     "pinball": {
         "id": "pinball", "label": "Pinball Machine", "placement": "floor",
@@ -447,6 +464,10 @@ EXEMPLARS = {
         "thumb_name": "T_Pinball-Thumbnail",
         "default_price": 100.0,
         "widget_sibling": "Pinball-Machine_A_C",
+        # Title key len 41 -> item token 18 (length-neutral). Pinball's colour
+        # materials live on Pinball-Machine_Base/its mesh (not this BP's name map),
+        # so no verified body-reskin mapping yet -> clone+register+name only.
+        "cdo_title_key": "Interface_Statistic-LevelUp_Pinball_Title",
     },
 }
 
@@ -596,7 +617,8 @@ def _extract_exemplar(ex: dict, dest: Path) -> tuple[Path, Path]:
 
 def _clone_exemplar(ex: dict, item: str, mesh: str,
                     src_ua: Path, src_ux: Path, stage: Path,
-                    thumb_token: str | None = None) -> dict:
+                    thumb_token: str | None = None,
+                    extra_renames: list[str] | None = None) -> dict:
     """RE-SERIALISE the exemplar into a NEW package identity (fresh PackageGuid +
     PackageSource + FolderName) pointing at the user's cooked mesh, via
     relink.clone (in-process, any-length exact name-map renames). Stages
@@ -621,6 +643,11 @@ def _clone_exemplar(ex: dict, item: str, mesh: str,
     if thumb_token:
         new_thumb_path = f"{game_dir}/{thumb_token}"
         extra += [ex["thumb_path"], new_thumb_path, ex["thumb_name"], thumb_token]
+
+    # Equipment: repoint the BP's colour-MI references to the cloned MIs (old/new
+    # package-path + object-leaf pairs computed by _stage_equipment_textures).
+    if extra_renames:
+        extra += list(extra_renames)
 
     relink.clone(src_ua, out_ua, ex["self_path"], new_self,
                  ex["class_token"], f"{item}_C", *extra)
@@ -692,13 +719,27 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
 
-    # Custom mesh skin (texture) is DEFERRED: a real skin swap needs the cook to
-    # emit + ship the model's own base-colour texture (game-box work). Bake the
-    # texture into your model for now. Never fatal — just a note. (The earlier path
-    # wrongly injected the image into the MESH uasset, which crashed the build.)
-    if texture and progress:
-        progress("Note: a separate skin isn't applied yet — bake it into your "
-                 "model. Continuing…", None)
+    # Custom mesh skin (texture):
+    #  - Decoration/cooked items: a real per-item skin swap is still deferred (bake
+    #    it into your model); just a note, never fatal.
+    #  - Equipment (keep_mesh) WITH colour materials: reskin the body base-colour
+    #    texture from the user's image and repoint the cloned colour MIs to it, so
+    #    only this new machine is recoloured (the Arcade_D recipe). Best-effort:
+    #    a reskin hiccup falls back to the vanilla skin, never fails the add.
+    mi_renames: list[str] = []
+    if not keep_mesh:
+        if texture and progress:
+            progress("Note: a separate skin isn't applied yet — bake it into your "
+                     "model. Continuing…", None)
+    elif texture and ex.get("color_materials"):
+        try:
+            if progress:
+                progress("Reskinning the machine's colour…", None)
+            mi_renames = _stage_equipment_textures(ex, item, texture, stage)
+        except Exception as e:
+            if progress:
+                progress(f"Colour reskin skipped ({e}); keeping the vanilla skin.", None)
+            mi_renames = []
 
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="pakrat_ex_"))
@@ -722,15 +763,24 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
                 progress(f"Custom thumbnail skipped ({e}); using the default icon.", None)
 
     cloned = _clone_exemplar(ex, item, mesh, src_ua, src_ux, stage,
-                             thumb_token=thumb_token)
+                             thumb_token=thumb_token, extra_renames=mi_renames)
 
     # CDO: swap the localisation title-key (name resolves via the StringTable set in
     # run_add_pipeline) AND set the price — both length-neutral in-place (the #6/#7
     # fix: token length was chosen so the key byte length is unchanged).
-    # keep_mesh (equipment) has NO Interface_Product_* title key in its CDO, so setcdo
-    # is skipped: the clone keeps the base machine's vanilla name + price.
     p = float(price) if price is not None else ex.get("default_price", 0.0)
-    if not keep_mesh:
+    if keep_mesh:
+        # Equipment CDO layout differs from decorations (its title key is a
+        # Statistic-LevelUp key, same byte length as Interface_ModKit_<item>_Title).
+        # A swap that can't be applied length-neutrally must NOT fail the whole add —
+        # fall back to the vanilla machine name/price. (In-game name = Yodah confirms.)
+        try:
+            relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
+                          _title_key(item), price=p)
+        except Exception as e:
+            if progress:
+                progress(f"Custom equipment name/price skipped ({e}); vanilla kept.", None)
+    else:
         relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
                       _title_key(item), price=p)
     return {"pkg": cloned["pkg_game"], "cls": cloned["cls"], "name": display_name,
@@ -780,6 +830,59 @@ def _stage_custom_thumbnail(ex: dict, user_image: str, new_thumb_game_path: str,
         base_mount=ex["thumb_path"].replace("/Game/", "RetroRewind/Content/", 1),
         user_image=user_image, new_game_path=new_thumb_game_path,
         old_leaf=ex["thumb_name"], new_leaf=thumb_token, stage=stage)
+
+
+def _extract_game_asset(game_path: str, dest: Path) -> Path:
+    """repak-unpack a single asset (.uasset + .uexp) by /Game path from the base
+    pak. Returns the extracted .uasset. Used to pull the colour MIs to clone."""
+    mount = game_path.replace("/Game/", "RetroRewind/Content/", 1)
+    pak_dir, leaf = mount.rsplit("/", 1)
+    core._repak("unpack", "-f", "-o", str(dest),
+                "-i", f"{pak_dir}/{leaf}.uasset",
+                "-i", f"{pak_dir}/{leaf}.uexp",
+                str(core.base_pak()))
+    return dest / Path(*pak_dir.split("/")) / f"{leaf}.uasset"
+
+
+def _stage_equipment_textures(ex: dict, item: str, user_body_image: str,
+                              stage: Path) -> list[str]:
+    """Recolour ONE equipment machine additively (the Arcade_D recipe): reskin the
+    body base-colour texture from the user's image, then clone the colour MIs to new
+    identities under the item's own /Game dir — the body MI repointed to the new
+    texture. Returns the BP name-map rename pairs (old MI package-path + object-leaf
+    -> new) so the cloned Blueprint references the new MIs (and thus the new skin)."""
+    import tempfile
+    base = ex["self_path"].rsplit("/", 2)[0]           # /Game/.../prop
+    game_dir = f"{base}/{item}"                         # /Game/.../prop/<item>
+
+    # 1) new body texture from the user's image, re-identitied under the item dir.
+    body = ex["body_texture"]
+    new_body_leaf = f"T_{item}_bc"
+    new_body_game = f"{game_dir}/{new_body_leaf}"
+    _reskin_and_stage(
+        base_mount=body["path"].replace("/Game/", "RetroRewind/Content/", 1),
+        user_image=user_body_image, new_game_path=new_body_game,
+        old_leaf=body["name"], new_leaf=new_body_leaf, stage=stage)
+
+    # 2) clone each colour MI to a fresh identity under the item dir; the body MI
+    #    also repoints its base-colour texture ref (path + leaf) to the new texture.
+    renames: list[str] = []
+    for i, mi in enumerate(ex["color_materials"]):
+        new_mi_leaf = f"MI_{item}_{i:02d}"
+        new_mi_game = f"{game_dir}/{new_mi_leaf}"
+        tmp = Path(tempfile.mkdtemp(prefix="pakrat_mi_"))
+        mi_ua = _extract_game_asset(mi["path"], tmp)
+        mount_dir = "RetroRewind/Content/" + new_mi_game.rsplit("/", 1)[0][len("/Game/"):]
+        dest = stage / Path(*mount_dir.split("/"))
+        dest.mkdir(parents=True, exist_ok=True)
+        out_ua = dest / f"{new_mi_leaf}.uasset"
+        # an MI has no _C class/CDO -> the leaf name rides the old_cls/new_cls slot.
+        tex_pairs = ([body["path"], new_body_game, body["name"], new_body_leaf]
+                     if mi.get("body") else [])
+        relink.clone(mi_ua, out_ua, mi["path"], new_mi_game,
+                     mi["name"], new_mi_leaf, *tex_pairs)
+        renames += [mi["path"], new_mi_game, mi["name"], new_mi_leaf]
+    return renames
 
 
 def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> dict:
