@@ -2410,16 +2410,15 @@ class ExtractDonePage(QWizardPage):
         written = getattr(self.wizard(), "extract_written", [])
         dest = getattr(self.wizard(), "extract_dest", "")
         self.msg.setText(f"Extracted {len(written)} file(s) to:\n{dest}")
-        if written:
-            try:
-                core.reveal_in_explorer(written[0])
-            except Exception:
-                pass
+        # No auto-open — the user opens the folder with the button below if they want.
 
     def _reveal(self):
-        w = getattr(self.wizard(), "extract_written", [])
-        if w:
-            core.reveal_in_explorer(w[0])
+        dest = getattr(self.wizard(), "extract_dest", "")
+        if dest and os.path.isdir(dest):
+            try:
+                os.startfile(dest)                 # open the folder itself (Windows)
+            except (AttributeError, OSError):
+                core.reveal_in_explorer(dest)
 
     def isComplete(self):
         return True

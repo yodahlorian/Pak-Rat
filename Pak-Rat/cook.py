@@ -570,15 +570,37 @@ if meshes:
             for i in range(3):
                 mn[i] = min(mn[i], co[i]); mx[i] = max(mx[i], co[i])
     ext = [mx[i] - mn[i] for i in range(3)]
-    depth = ext.index(min(ext))                 # thinnest axis = depth (wall normal)
-    # Replicate the vanilla PosterFrame pivot convention (measured from the base
-    # pak): on the depth axis the pivot sits ~73% from the min end, so the mesh
-    # straddles the wall plane like the real poster rather than being fully in
-    # front/behind it; centred on the two large face axes.
+    thin = ext.index(min(ext))                  # thinnest axis = depth
+    # The vanilla PosterFrame mesh component is at IDENTITY, so the mount is purely
+    # the mesh's own orientation + pivot. Its thin/depth axis is WORLD Y (the wall
+    # normal). Rotate the user mesh so its thin axis becomes Y (matching the poster)
+    # -- without this the flat face points the wrong way and it won't wall-mount.
+    import math
+    rot = None
+    if thin == 0:                               # X -> Y  (rotate about Z)
+        rot = (0.0, 0.0, math.radians(90))
+    elif thin == 2:                             # Z -> Y  (rotate about X)
+        rot = (math.radians(-90), 0.0, 0.0)
+    if rot:
+        for o in meshes:
+            o.rotation_euler = (o.rotation_euler[0] + rot[0],
+                                o.rotation_euler[1] + rot[1],
+                                o.rotation_euler[2] + rot[2])
+            o.select_set(True)
+        bpy.context.view_layer.objects.active = meshes[0]
+        bpy.ops.object.transform_apply(rotation=True)
+        mn = [1e18, 1e18, 1e18]; mx = [-1e18, -1e18, -1e18]
+        for o in meshes:
+            for v in o.data.vertices:
+                co = o.matrix_world @ v.co
+                for i in range(3):
+                    mn[i] = min(mn[i], co[i]); mx[i] = max(mx[i], co[i])
+    # Now the depth axis is Y. Pivot: Y at ~73% from min (the measured vanilla
+    # poster offset); centred on the two large face axes (X, Z).
     ratio = 0.733
     off = [0.0, 0.0, 0.0]
     for i in range(3):
-        if i == depth:
+        if i == 1:
             off[i] = -(mn[i] + ratio * (mx[i] - mn[i]))
         else:
             off[i] = -(mn[i] + mx[i]) / 2.0
