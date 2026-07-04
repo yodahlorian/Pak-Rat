@@ -110,7 +110,10 @@ def _blender_uemodel_convert(uemodel: str, out: str, progress=None) -> None:
     """Import a .uemodel in the vendored Blender (UEFormat addon — the same importer
     the Add-Asset uemodel path uses) and re-export it as FBX / OBJ / glTF."""
     import cook
-    bl = cook.ensure_blender(progress)
+    # cook helpers call progress(msg, pct); the extract worker's callback takes one
+    # arg. Adapt so ensure_blender's 2-arg calls don't blow up before Blender runs.
+    p2 = (lambda m, pct=None: progress(m)) if progress else None
+    bl = cook.ensure_blender(p2)
     script = cook.home() / "_meshx_convert.py"
     script.write_text(_UEMODEL_CONVERT_SCRIPT, encoding="utf-8")
     addons = str(core.VENDOR("blender_addons"))

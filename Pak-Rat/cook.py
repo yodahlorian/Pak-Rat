@@ -571,12 +571,17 @@ if meshes:
                 mn[i] = min(mn[i], co[i]); mx[i] = max(mx[i], co[i])
     ext = [mx[i] - mn[i] for i in range(3)]
     depth = ext.index(min(ext))                 # thinnest axis = depth (wall normal)
-    # Put the mesh's FRONT face at the origin so it extends OUT into the room (the
-    # game snaps the origin to the wall; the +depth side is into the wall, so the
-    # mesh must sit on the -depth side). Large axes centred on the origin.
+    # Replicate the vanilla PosterFrame pivot convention (measured from the base
+    # pak): on the depth axis the pivot sits ~73% from the min end, so the mesh
+    # straddles the wall plane like the real poster rather than being fully in
+    # front/behind it; centred on the two large face axes.
+    ratio = 0.733
     off = [0.0, 0.0, 0.0]
     for i in range(3):
-        off[i] = -mx[i] if i == depth else -(mn[i] + mx[i]) / 2.0
+        if i == depth:
+            off[i] = -(mn[i] + ratio * (mx[i] - mn[i]))
+        else:
+            off[i] = -(mn[i] + mx[i]) / 2.0
     for o in meshes:
         o.location = (o.location[0] + off[0], o.location[1] + off[1], o.location[2] + off[2])
         o.select_set(True)
