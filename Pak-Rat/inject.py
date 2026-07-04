@@ -294,6 +294,10 @@ def reset_additions() -> None:
     except FileNotFoundError:
         pass
     shutil.rmtree(asset_library(), ignore_errors=True)
+    try:
+        _pak_name_file().unlink()          # forget the saved name -> next add prompts
+    except FileNotFoundError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +327,25 @@ def _merge_tree(src: Path, dst: Path) -> None:
             out = dst / p.relative_to(src)
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, out)
+
+
+# The mod file name is chosen ONCE (first add) and reused on every later add, so the
+# deployed pak keeps the same name and each add overwrites it in ~mods rather than
+# leaving a trail of conflicting paks. reset_additions() clears it (start fresh).
+def _pak_name_file() -> Path:
+    return cook.home() / "pak_name.txt"
+
+
+def saved_pak_name() -> str | None:
+    """The pak name saved on the first add, or None if none saved yet."""
+    p = _pak_name_file()
+    if p.is_file():
+        return p.read_text(encoding="utf-8").strip() or None
+    return None
+
+
+def save_pak_name(name: str) -> None:
+    _pak_name_file().write_text(name.strip(), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

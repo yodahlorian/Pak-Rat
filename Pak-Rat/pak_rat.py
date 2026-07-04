@@ -2605,9 +2605,21 @@ class PakRatWizard(QWizard):
             super().accept()   # extract already saved on the progress page
             return
         page = self.page(PAGE_FINISH)
-        name = self._ask_pak_name()
-        if name is None:
-            return  # cancelled the name prompt — keep the wizard open
+        # Add mode: the FIRST add names the pak; every later add silently reuses that
+        # name so the deploy OVERWRITES the same pak (extend-in-place) instead of
+        # spawning a second, conflicting one. "Start fresh" clears the saved name
+        # (reset_additions), so the next add prompts for a new one.
+        is_add_mode = getattr(self, "mode", "regular") == "add"
+        saved = (inject.saved_pak_name()
+                 if (is_add_mode and not getattr(self, "add_reset", False)) else None)
+        if saved:
+            name = saved
+        else:
+            name = self._ask_pak_name()
+            if name is None:
+                return  # cancelled the name prompt — keep the wizard open
+            if is_add_mode:
+                inject.save_pak_name(name)   # remember it for future adds
         try:
             final_pak = core.rename_pak(self.pak_path, name)
             self.pak_path = final_pak
