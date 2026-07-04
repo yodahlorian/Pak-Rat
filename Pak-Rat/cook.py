@@ -534,6 +534,57 @@ print("PAKRAT_CONVERTED", out)
 '''
 
 
+def wall_recenter(env: CookEnv, src: str, progress=None) -> str:
+    """Move a (flat/poster-like) mesh's pivot to its BACK face so it wall-mounts
+    flush instead of sinking halfway into the wall. The back of the thinnest axis
+    (the 'depth') is set to the origin and the two large axes are centered; the
+    game snaps that origin to the wall surface, so the whole mesh then sits in
+    front of the wall (and its collision stops penetrating, which is what blocked
+    placement). Returns the recentered FBX path. Best-effort: on any failure the
+    original is returned unchanged."""
+    if progress:
+        progress("Aligning pivot for wall mounting…", None)
+    out = str(home() / "_convert" / (Path(src).stem + "_wall.fbx"))
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    script = home() / "_wallrecenter.py"
+    script.write_text(_WALL_RECENTER_SCRIPT, encoding="utf-8")
+    core._run([env.blender_exe, "--background", "--python", str(script), "--", src, out])
+    return out if os.path.isfile(out) else src
+
+
+_WALL_RECENTER_SCRIPT = r'''
+import bpy, sys
+inp, out = sys.argv[-2], sys.argv[-1]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=inp)
+meshes = [o for o in bpy.context.scene.objects if o.type == "MESH"]
+if meshes:
+    for o in meshes:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    mn = [1e18, 1e18, 1e18]; mx = [-1e18, -1e18, -1e18]
+    for o in meshes:
+        for v in o.data.vertices:
+            co = o.matrix_world @ v.co
+            for i in range(3):
+                mn[i] = min(mn[i], co[i]); mx[i] = max(mx[i], co[i])
+    ext = [mx[i] - mn[i] for i in range(3)]
+    depth = ext.index(min(ext))                 # thinnest axis = depth (into wall)
+    off = [0.0, 0.0, 0.0]
+    for i in range(3):
+        off[i] = -mn[i] if i == depth else -(mn[i] + mx[i]) / 2.0
+    for o in meshes:
+        o.location = (o.location[0] + off[0], o.location[1] + off[1], o.location[2] + off[2])
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    bpy.ops.object.transform_apply(location=True)
+bpy.ops.export_scene.fbx(filepath=out, use_selection=False, object_types={"MESH"},
+    apply_unit_scale=True, add_leaf_bones=False, path_mode="COPY")
+print("PAKRAT_WALLRECENTER", out)
+'''
+
+
 # ---------------------------------------------------------------------------
 # Embedded-texture extraction (v2.0.8)
 #

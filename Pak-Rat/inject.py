@@ -572,7 +572,7 @@ def _clone_exemplar(ex: dict, item: str, mesh: str,
 
 
 def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
-                    stage: Path, progress=None) -> int:
+                    stage: Path, progress=None, placement: str | None = None) -> int:
     """Import+cook the user FBX to /Game/.../meshes/<mesh_token> and stage it.
     Returns files staged (0 => cook produced nothing)."""
     log = cook.home() / "inject_cook.log"
@@ -583,6 +583,10 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
     # Normalise ANY non-FBX source (incl. .uemodel from FModel) to FBX via Blender
     # before the UE import — UE's importer only reads FBX/OBJ. Pass-through for .fbx.
     fbx = cook.convert_to_fbx(env, fbx, progress=progress)
+    # Wall-mounted items: shift the pivot to the mesh's back face so it mounts flush
+    # against the wall (not half-buried) and its collision no longer penetrates.
+    if placement == "wall":
+        fbx = cook.wall_recenter(env, fbx, progress=progress)
     script = cook.project_dir() / "pakrat_mesh_import.py"
     script.write_text(_MESH_COOK_SCRIPT % {
         "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token},
@@ -621,7 +625,8 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     entry {pkg, cls, name, category, price}."""
     ex = get_exemplar(exemplar, category)
     item, mesh = _slot_tokens(ex, index)
-    if _cook_user_mesh(env, fbx, mesh, stage, progress=progress) == 0:
+    if _cook_user_mesh(env, fbx, mesh, stage, progress=progress,
+                       placement=ex.get("placement")) == 0:
         raise RuntimeError(
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
