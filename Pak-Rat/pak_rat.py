@@ -1267,6 +1267,7 @@ class AddInputPage(QWizardPage):
 
         self._texture = None
         self._thumbnail = None
+        self._screen = None
 
         self.pick_btn = QPushButton("Choose a 3D model…")
         self.pick_lbl = QLabel("No model selected.")
@@ -1280,6 +1281,14 @@ class AddInputPage(QWizardPage):
         self.tex_lbl = QLabel("Skin swap is coming — for now, bake the texture into "
                               "your model. (This picker is a no-op this build.)")
         self.tex_lbl.setStyleSheet("color:#888;")
+        # Second (optional) equipment texture: the machine's screen / display.
+        self.screen_btn = QPushButton("Choose a screen / display texture…")
+        self.screen_lbl = QLabel("Optional — replaces the machine's video-screen texture.")
+        self.screen_lbl.setStyleSheet("color:#888;")
+        self.screen_lbl.setWordWrap(True)
+        # Equipment: two explicit buttons to pick the machine to clone.
+        self.eq_arcade_btn = QPushButton("🕹  Add Arcade Machine")
+        self.eq_pinball_btn = QPushButton("🎯  Add Pinball Machine")
         self.thumb_btn = QPushButton("Choose a catalogue thumbnail…")
         self.thumb_lbl = QLabel("Optional — reuses the base item's icon if left blank.")
         self.thumb_lbl.setStyleSheet("color:#888;")
@@ -1322,9 +1331,14 @@ class AddInputPage(QWizardPage):
         self.base_combo = QComboBox()
 
         lay = QVBoxLayout(self)
+        eqrow = QHBoxLayout()
+        eqrow.addWidget(self.eq_arcade_btn, 1)
+        eqrow.addWidget(self.eq_pinball_btn, 1)
+        lay.addLayout(eqrow)
         lay.addLayout(_row((self.pick_btn, 0), (self.pick_lbl, 1)))
         lay.addSpacing(6)
-        lay.addLayout(_row((QLabel("Base"), 0), (self.base_combo, 1)))
+        self.base_label = QLabel("Base")
+        lay.addLayout(_row((self.base_label, 0), (self.base_combo, 1)))
         lay.addSpacing(6)
 
         name_price = QHBoxLayout()
@@ -1337,6 +1351,7 @@ class AddInputPage(QWizardPage):
         lay.addSpacing(6)
 
         lay.addLayout(_row((self.tex_btn, 0), (self.tex_lbl, 1)))
+        lay.addLayout(_row((self.screen_btn, 0), (self.screen_lbl, 1)))
         lay.addLayout(_row((self.thumb_btn, 0), (self.thumb_lbl, 1)))
         lay.addSpacing(6)
         lay.addLayout(_row((self.queue_btn, 0), (self.queue_lbl, 1)))
@@ -1353,6 +1368,9 @@ class AddInputPage(QWizardPage):
         self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
         # Switching base may flip the model-picker requirement (keep_mesh equipment).
         self.base_combo.currentIndexChanged.connect(lambda _: self._apply_base_gate())
+        self.screen_btn.clicked.connect(self._pick_screen)
+        self.eq_arcade_btn.clicked.connect(lambda: self._pick_equipment("arcade"))
+        self.eq_pinball_btn.clicked.connect(lambda: self._pick_equipment("pinball"))
 
     def initializePage(self):
         t = getattr(self.wizard(), "add_type", "Decoration")
@@ -1384,8 +1402,16 @@ class AddInputPage(QWizardPage):
     def _apply_base_gate(self):
         # keep_mesh bases (equipment: arcade/pinball) clone the whole vanilla machine
         # — no user MODEL — so hide the model picker and drop its requirement. They DO
-        # take an optional body/colour texture, so the texture picker stays (relabelled).
+        # take a body/colour texture (+ arcade a screen texture), so those pickers stay.
+        cat = getattr(self.wizard(), "add_category", "Decoration")
+        is_equip = (cat == "Equipmement")
         km = self._base_keep_mesh()
+        ex = self._current_exemplar() if km else {}
+        # Two explicit equipment buttons stand in for the Base dropdown here.
+        self.eq_arcade_btn.setVisible(is_equip)
+        self.eq_pinball_btn.setVisible(is_equip)
+        self.base_label.setVisible(not is_equip and self.base_combo.count() > 1)
+        self.base_combo.setVisible(not is_equip and self.base_combo.count() > 1)
         self.pick_btn.setVisible(not km)
         self.pick_lbl.setVisible(not km)
         if km:
@@ -1399,7 +1425,27 @@ class AddInputPage(QWizardPage):
         self.tex_lbl.setStyleSheet("color:#888;")
         self.tex_btn.setVisible(True)
         self.tex_lbl.setVisible(True)
+        # Screen/display picker: only for equipment bases that have a screen texture.
+        has_screen = bool(km and ex.get("screen_texture"))
+        self.screen_btn.setVisible(has_screen)
+        self.screen_lbl.setVisible(has_screen)
         self.completeChanged.emit()
+
+    def _pick_screen(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a screen / display texture", "", _image_filter())
+        if path:
+            self._screen = path
+            self.screen_lbl.setText(_basename(path))
+
+    def _pick_equipment(self, exemplar_id):
+        # The two Add-Arcade / Add-Pinball buttons select which machine to clone by
+        # pointing the (hidden) base at the matching exemplar.
+        for i in range(self.base_combo.count()):
+            if self.base_combo.itemData(i) == exemplar_id:
+                self.base_combo.setCurrentIndex(i)
+                break
+        self._apply_base_gate()
 
     def _pick(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1451,6 +1497,7 @@ class AddInputPage(QWizardPage):
             "exemplar": self.base_combo.currentData(),   # per-item floor/wall base
             "price": self._price(),
             "texture": self._texture,
+            "screen": self._screen,                      # equipment screen/display tex
             "thumbnail": self._thumbnail,
         }
 
@@ -1458,10 +1505,12 @@ class AddInputPage(QWizardPage):
         self._fbx = None
         self._texture = None
         self._thumbnail = None
+        self._screen = None
         self.pick_lbl.setText("No model selected.")
         self.name_edit.clear()
         self.price_edit.clear()
         self.tex_lbl.setText("Skin swap is coming — bake the texture into your model.")
+        self.screen_lbl.setText("Optional — replaces the machine's video-screen texture.")
         self.thumb_lbl.setText("Optional — reuses the base item's icon if left blank.")
 
     def _queue_current(self):

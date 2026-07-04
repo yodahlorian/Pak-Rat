@@ -448,6 +448,13 @@ EXEMPLARS = {
             {"path": "/Game/VideoStore/asset/textures/T_Arcade_A_01/MI_Arcade_A_02",
              "name": "MI_Arcade_A_02", "body": False},
         ],
+        # Screen/display: the video-clips texture the arcade shows on its screen. It
+        # is applied by the BP's SKU logic, not an MI in the clone, so it is swapped
+        # by OVERRIDING the texture at its own path (the second, optional picker).
+        "screen_texture": {
+            "path": "/Game/VideoStore/asset/textures/T_Arcade_A_01/T_Arcade_A_VideoClips_01_bc",
+            "name": "T_Arcade_A_VideoClips_01_bc",
+        },
     },
     "pinball": {
         "id": "pinball", "label": "Pinball Machine", "placement": "floor",
@@ -464,10 +471,15 @@ EXEMPLARS = {
         "thumb_name": "T_Pinball-Thumbnail",
         "default_price": 100.0,
         "widget_sibling": "Pinball-Machine_A_C",
-        # Title key len 41 -> item token 18 (length-neutral). Pinball's colour
-        # materials live on Pinball-Machine_Base/its mesh (not this BP's name map),
-        # so no verified body-reskin mapping yet -> clone+register+name only.
+        # Title key len 41 -> item token 18 (length-neutral).
         "cdo_title_key": "Interface_Statistic-LevelUp_Pinball_Title",
+        # Pinball's colour MI lives on its shared Base/mesh (not this BP's name map),
+        # so a per-item MI-clone repoint isn't reachable — the body/colour texture is
+        # swapped by OVERRIDING it at its own path (functional; shared across pinballs).
+        "body_override": {
+            "path": "/Game/VideoStore/asset/textures/T_Pinball_A_01/T_PinBall_A_01_bc",
+            "name": "T_PinBall_A_01_bc",
+        },
     },
 }
 
@@ -701,7 +713,7 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
                      category: str, index: int, stage: Path,
                      price: float | None = None, texture: str | None = None,
                      thumbnail: str | None = None, progress=None,
-                     exemplar: str | None = None) -> dict:
+                     exemplar: str | None = None, screen: str | None = None) -> dict:
     """Cook the user's mesh + clone the type's exemplar to point at it, then stamp
     the item's CDO (custom name key + price) LENGTH-NEUTRALLY. Optional `thumbnail`
     gives a custom catalogue icon (best-effort; falls back to the default icon).
@@ -731,15 +743,35 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
         if texture and progress:
             progress("Note: a separate skin isn't applied yet — bake it into your "
                      "model. Continuing…", None)
-    elif texture and ex.get("color_materials"):
-        try:
-            if progress:
-                progress("Reskinning the machine's colour…", None)
-            mi_renames = _stage_equipment_textures(ex, item, texture, stage)
-        except Exception as e:
-            if progress:
-                progress(f"Colour reskin skipped ({e}); keeping the vanilla skin.", None)
-            mi_renames = []
+    else:
+        # Equipment body/colour: additive per-item MI reskin where the colour MIs are
+        # BP-reachable (arcade), else an in-place texture override (pinball).
+        if texture and ex.get("color_materials"):
+            try:
+                if progress:
+                    progress("Reskinning the machine's colour…", None)
+                mi_renames = _stage_equipment_textures(ex, item, texture, stage)
+            except Exception as e:
+                if progress:
+                    progress(f"Colour reskin skipped ({e}); keeping the vanilla skin.", None)
+                mi_renames = []
+        elif texture and ex.get("body_override"):
+            try:
+                if progress:
+                    progress("Reskinning the machine's colour…", None)
+                _reskin_override(ex["body_override"], texture, stage)
+            except Exception as e:
+                if progress:
+                    progress(f"Colour reskin skipped ({e}); keeping the vanilla skin.", None)
+        # Equipment screen/display: override the video-screen texture in place.
+        if screen and ex.get("screen_texture"):
+            try:
+                if progress:
+                    progress("Reskinning the screen…", None)
+                _reskin_override(ex["screen_texture"], screen, stage)
+            except Exception as e:
+                if progress:
+                    progress(f"Screen reskin skipped ({e}); keeping the vanilla screen.", None)
 
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="pakrat_ex_"))
@@ -885,6 +917,32 @@ def _stage_equipment_textures(ex: dict, item: str, user_body_image: str,
     return renames
 
 
+def _reskin_override(tex: dict, user_image: str, stage: Path) -> None:
+    """Reskin a texture from the user's image and stage it at its OWN vanilla path
+    (a texture override — the PacMan mechanism). Used where the texture is applied by
+    Blueprint/SKU logic rather than a clone-reachable MI (arcade screen, pinball body).
+    Keeps the vanilla identity (no re-path); the pak just supplies new pixels."""
+    base_mount = tex["path"].replace("/Game/", "RetroRewind/Content/", 1)
+    leaf = tex["name"]
+    spec = core.prepare_target(base_mount)                # extract + read dxgi/WxH
+    try:
+        prepared = core.prepare_image(user_image, spec)   # resize to target WxH
+        injected = Path(spec.work_dir) / "override"
+        injected.mkdir(parents=True, exist_ok=True)
+        core._injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
+                        "--version", core.UE_VERSION, "--save_folder", str(injected)])
+        if not (injected / f"{leaf}.uasset").is_file():
+            raise RuntimeError("injector produced no output texture")
+        mount_dir = base_mount.rsplit("/", 1)[0]
+        dest = stage / Path(*mount_dir.split("/"))
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in injected.glob(leaf + ".*"):
+            if f.suffix in (".uasset", ".uexp", ".ubulk"):
+                shutil.copy2(f, dest / f.name)
+    finally:
+        core.cleanup_target(spec)
+
+
 def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> dict:
     """
     items: [{'fbx': path, 'name': str, 'category': 'Decoration'}, …]
@@ -922,7 +980,7 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
             it.get("category", "Decoration"), base_index + i, stage,
             price=it.get("price"), texture=it.get("texture"),
             thumbnail=it.get("thumbnail"), progress=progress,
-            exemplar=it.get("exemplar"))
+            exemplar=it.get("exemplar"), screen=it.get("screen"))
         built.append(entry)
 
     # Persist THIS run's freshly-staged item files (mesh + CDO + thumbnail) into the
