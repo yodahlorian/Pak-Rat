@@ -1351,6 +1351,8 @@ class AddInputPage(QWizardPage):
         self.thumb_btn.clicked.connect(self._pick_thumbnail)
         self.queue_btn.clicked.connect(self._queue_current)
         self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
+        # Switching base may flip the model-picker requirement (keep_mesh equipment).
+        self.base_combo.currentIndexChanged.connect(lambda _: self._apply_base_gate())
 
     def initializePage(self):
         t = getattr(self.wizard(), "add_type", "Decoration")
@@ -1364,7 +1366,30 @@ class AddInputPage(QWizardPage):
         self.base_combo.setVisible(self.base_combo.count() > 1)
         self._queue = []
         self._clear_form()
+        self._apply_base_gate()
         self._refresh_queue()
+        self.completeChanged.emit()
+
+    def _current_exemplar(self):
+        eid = self.base_combo.currentData()
+        cat = getattr(self.wizard(), "add_category", "Decoration")
+        return inject.get_exemplar(eid, cat)
+
+    def _base_keep_mesh(self):
+        try:
+            return bool(self._current_exemplar().get("keep_mesh"))
+        except Exception:
+            return False
+
+    def _apply_base_gate(self):
+        # keep_mesh bases (equipment: arcade/pinball) clone the whole vanilla
+        # machine — no user model or skin needed — so hide the model + texture
+        # pickers and drop the model requirement. Everything else keeps them.
+        km = self._base_keep_mesh()
+        for w in (self.pick_btn, self.pick_lbl, self.tex_btn, self.tex_lbl):
+            w.setVisible(not km)
+        if km:
+            self.pick_lbl.setText("Cloned from the base machine — no model needed.")
         self.completeChanged.emit()
 
     def _pick(self):
@@ -1401,6 +1426,9 @@ class AddInputPage(QWizardPage):
                 or "Custom Item")
 
     def _form_filled(self):
+        # keep_mesh (equipment) needs no model — just a name.
+        if self._base_keep_mesh():
+            return bool(self.name_edit.text().strip())
         return bool(self._fbx) and bool(self.name_edit.text().strip())
 
     def _current_item(self):
@@ -1435,6 +1463,7 @@ class AddInputPage(QWizardPage):
             return
         self._queue.append(it)
         self._clear_form()
+        self._apply_base_gate()
         self._refresh_queue()
         self.completeChanged.emit()
 

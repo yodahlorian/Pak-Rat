@@ -254,6 +254,9 @@ def manifest_items() -> dict[str, list[dict]]:
             "pkg": d.get("pkg", ""), "cls": d.get("cls", ""),
             "name": d.get("name", sec[5:]),
             "price": float(price) if price else None,
+            # widget sibling anchor — persisted so re-adds don't regress a wall /
+            # equipment item back to the category default (Couch_C floor sibling).
+            "sibling": d.get("sibling") or None,
         })
     return out
 
@@ -271,6 +274,7 @@ def save_manifest(items_by_cat: dict[str, list[dict]]) -> Path:
                 "category": cat, "name": it.get("name", ""),
                 "pkg": it["pkg"], "cls": it["cls"],
                 "price": str(it.get("price") if it.get("price") is not None else ""),
+                "sibling": it.get("sibling") or "",
             }
     p = manifest_path()
     with p.open("w", encoding="utf-8") as f:
@@ -386,6 +390,10 @@ EXEMPLARS = {
         "thumb_path": "/Game/VideoStore/asset/prop/decoration/Couch/T_Decoration_Couch_T",
         "thumb_name": "T_Decoration_Couch_T",
         "default_price": 100.0,
+        # Widget import the clone is inserted BESIDE in the product-class array.
+        # In-game placement follows the array neighbour (floor beside Couch_C =
+        # floor placement), so wall items must anchor on a WALL sibling instead.
+        "widget_sibling": "Couch_C",
     },
     "poster_frame": {
         "id": "poster_frame", "label": "Movie Poster (wall-mounted)", "placement": "wall",
@@ -400,10 +408,49 @@ EXEMPLARS = {
         "thumb_path": "/Game/VideoStore/asset/prop/PosterFrame/T_PosterFrame_01_T",
         "thumb_name": "T_PosterFrame_01_T",
         "default_price": 100.0,
+        # Wall anchor — PosterFrame_C is a Decoration widget import that wall-mounts.
+        # THE wall-mount fix: register cloned wall items beside THIS, not Couch_C.
+        "widget_sibling": "PosterFrame_C",
+    },
+    # --- Equipment (keep_mesh): cloned as a NEW identity that KEEPS the vanilla
+    # mesh + materials, so it looks like the base machine and needs no user model
+    # or UE cook. Registered on the real Equipmement product-class fn beside
+    # Pinball-Machine_A_C (the only equipment class present in the widget imports;
+    # Arcade_C is NOT a widget import). Equipment has no Interface_Product_* CDO
+    # title key, so build_added_item skips the length-neutral setcdo for these.
+    "arcade": {
+        "id": "arcade", "label": "Arcade Machine", "placement": "floor",
+        "category": "Equipmement", "keep_mesh": True,
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/arcade",
+        "asset": "Arcade",
+        "self_path": "/Game/VideoStore/asset/prop/arcade/Arcade",
+        "class_token": "Arcade_C",
+        "mesh_path": "/Game/VideoStore/asset/meshes/LA_Arcade_A_01",
+        "mesh_name": "LA_Arcade_A_01",
+        "thumb_path": "/Game/VideoStore/asset/prop/arcade/T_Arcade_01_T",
+        "thumb_name": "T_Arcade_01_T",
+        "default_price": 100.0,
+        "widget_sibling": "Pinball-Machine_A_C",
+    },
+    "pinball": {
+        "id": "pinball", "label": "Pinball Machine", "placement": "floor",
+        "category": "Equipmement", "keep_mesh": True,
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/Pinball",
+        "asset": "Pinball-Machine_A",
+        "self_path": "/Game/VideoStore/asset/prop/Pinball/Pinball-Machine_A",
+        "class_token": "Pinball-Machine_A_C",
+        # Pinball-Machine_A inherits its mesh from Pinball-Machine_Base (no own
+        # mesh ref). mesh_path/name only feed _slot_tokens' length math here.
+        "mesh_path": "/Game/VideoStore/asset/prop/Pinball/Pinball-Machine_Base",
+        "mesh_name": "Pinball-Machine_Base",
+        "thumb_path": "/Game/VideoStore/asset/prop/Pinball/T_Pinball-Thumbnail",
+        "thumb_name": "T_Pinball-Thumbnail",
+        "default_price": 100.0,
+        "widget_sibling": "Pinball-Machine_A_C",
     },
 }
 
-DEFAULT_EXEMPLAR = {"Decoration": "couch"}
+DEFAULT_EXEMPLAR = {"Decoration": "couch", "Equipmement": "arcade"}
 
 
 def exemplars_for(category: str) -> list[dict]:
@@ -476,13 +523,18 @@ except Exception:
 WIDGET_PAK_DIR = "RetroRewind/Content/VideoStore/asset/prop/catalogue"
 WIDGET_ASSET = "UI_Catalogue_Widget"
 
-# category -> (widget product-class fn, sibling class already in that array).
-# All added items currently register on the Decorations tab (proven path): the
-# clone is Decoration-derived and Couch_C is its in-array sibling.
+# category -> (widget product-class fn, DEFAULT sibling class already in that array).
+# The sibling is the widget import the new class is appended BESIDE; in-game
+# placement/tab follows that neighbour. An item's exemplar may override the sibling
+# per-item via `widget_sibling` (e.g. wall items anchor on PosterFrame_C, not Couch_C)
+# — the pipeline prefers it["sibling"] and falls back to the default here.
+# Equipment registers on its OWN product-class fn beside Pinball-Machine_A_C (verified
+# present in UI_Catalogue_Widget imports; Arcade_C is not). Decoration/Container/Station
+# still ride the proven Decoration fn until their own fn+sibling are verified in-game.
 CAT_WIDGET = {
     "Decoration":  ("Return Catalogue Decoration product class", "Couch_C"),
     "Container":   ("Return Catalogue Decoration product class", "Couch_C"),
-    "Equipmement": ("Return Catalogue Decoration product class", "Couch_C"),
+    "Equipmement": ("Return Catalogue Equipmement product class", "Pinball-Machine_A_C"),
     "Station":     ("Return Catalogue Decoration product class", "Couch_C"),
 }
 
@@ -521,7 +573,10 @@ def _slot_tokens(ex: dict, index: int) -> tuple[str, str]:
     title-key `Interface_ModKit_<item>_Title` matches the exemplar's existing key
     byte length (LENGTH-NEUTRAL setcdo -> no CDO corruption). The mesh token keeps
     the exemplar mesh-name length (clone renames are any-length regardless)."""
-    ilen = len(ex["cdo_title_key"]) - _TITLE_AFFIX      # Couch: 34 - 23 = 11
+    # keep_mesh (equipment) exemplars have no CDO title key (setcdo is skipped),
+    # so the item-token length isn't constrained — use the Couch length (11).
+    key = ex.get("cdo_title_key")
+    ilen = (len(key) - _TITLE_AFFIX) if key else 11     # Couch: 34 - 23 = 11
     mlen = len(ex["mesh_name"])
     item = ("P" + str(index).zfill(ilen - 1))[:ilen]
     mesh = ("M" + format(index, "X").zfill(mlen - 1))[:mlen]
@@ -557,9 +612,11 @@ def _clone_exemplar(ex: dict, item: str, mesh: str,
     dest.mkdir(parents=True, exist_ok=True)
     out_ua = dest / f"{item}.uasset"
 
-    # trailing rename pairs: mesh package ref + mesh object name (always); the
-    # thumbnail package ref + object name (only for a custom thumbnail).
-    extra = [ex["mesh_path"], new_mesh_path, ex["mesh_name"], mesh]
+    # trailing rename pairs: mesh package ref + mesh object name (renamed to the
+    # user's cooked mesh) — UNLESS keep_mesh, where the clone reuses the vanilla
+    # mesh (equipment: no user model), so the mesh ref must be left untouched.
+    extra = [] if ex.get("keep_mesh") else [ex["mesh_path"], new_mesh_path,
+                                            ex["mesh_name"], mesh]
     new_thumb_path = None
     if thumb_token:
         new_thumb_path = f"{game_dir}/{thumb_token}"
@@ -625,8 +682,12 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     entry {pkg, cls, name, category, price}."""
     ex = get_exemplar(exemplar, category)
     item, mesh = _slot_tokens(ex, index)
-    if _cook_user_mesh(env, fbx, mesh, stage, progress=progress,
-                       placement=ex.get("placement")) == 0:
+    keep_mesh = bool(ex.get("keep_mesh"))
+    # Equipment (keep_mesh) clones the base machine WHOLE — vanilla mesh + materials,
+    # no user model — so there is no FBX to cook. Everything else cooks the user mesh.
+    if not keep_mesh and _cook_user_mesh(
+            env, fbx, mesh, stage, progress=progress,
+            placement=ex.get("placement")) == 0:
         raise RuntimeError(
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
@@ -666,11 +727,15 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     # CDO: swap the localisation title-key (name resolves via the StringTable set in
     # run_add_pipeline) AND set the price — both length-neutral in-place (the #6/#7
     # fix: token length was chosen so the key byte length is unchanged).
+    # keep_mesh (equipment) has NO Interface_Product_* title key in its CDO, so setcdo
+    # is skipped: the clone keeps the base machine's vanilla name + price.
     p = float(price) if price is not None else ex.get("default_price", 0.0)
-    relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
-                  _title_key(item), price=p)
+    if not keep_mesh:
+        relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
+                      _title_key(item), price=p)
     return {"pkg": cloned["pkg_game"], "cls": cloned["cls"], "name": display_name,
-            "category": ex["category"], "price": p}
+            "category": ex["category"], "price": p,
+            "sibling": ex.get("widget_sibling")}
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +836,7 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
     for e in built:
         items_by_cat.setdefault(e["category"], []).append(
             {"pkg": e["pkg"], "cls": e["cls"], "name": e["name"],
-             "price": e.get("price")})
+             "price": e.get("price"), "sibling": e.get("sibling")})
 
     # Register EVERY manifest item natively into the catalogue widget: start from a
     # fresh vanilla widget, chain one insert per item (each output feeds the next).
@@ -780,13 +845,16 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
     cur_ua, _ = _extract_widget(wtmp)
     n = 0
     for cat, lst in items_by_cat.items():
-        fn, sib = CAT_WIDGET.get(cat, CAT_WIDGET["Decoration"])
+        fn, def_sib = CAT_WIDGET.get(cat, CAT_WIDGET["Decoration"])
         for it in lst:
             out_ua = wtmp / f"widget_{n}.uasset"
             # widget_insert wants the LEAF class name (P…_C), not the full object
             # path stored in it["cls"] (…/P.P…_C) — the import ObjectName + its
             # Default__<leaf> CDO import derive from the leaf.
             leaf_cls = it["cls"].rsplit(".", 1)[-1]
+            # Per-item sibling (wall items anchor on PosterFrame_C; equipment on
+            # Pinball-Machine_A_C), falling back to the category default.
+            sib = it.get("sibling") or def_sib
             relink.widget_insert(cur_ua, out_ua, it["pkg"], leaf_cls, sib, fn)
             cur_ua = out_ua
             n += 1
