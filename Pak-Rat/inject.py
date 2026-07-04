@@ -387,20 +387,18 @@ EXEMPLARS = {
         "thumb_name": "T_Decoration_Couch_T",
         "default_price": 100.0,
     },
-    "movie_wall": {
-        "id": "movie_wall", "label": "Movie Display (wall-mounted)", "placement": "wall",
+    "poster_frame": {
+        "id": "poster_frame", "label": "Movie Poster (wall-mounted)", "placement": "wall",
         "category": "Decoration",
-        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/decoration/Movie-Display",
-        "asset": "Shelf_Movie-Display_WallMounted_01",
-        "self_path": ("/Game/VideoStore/asset/prop/decoration/Movie-Display/"
-                      "Shelf_Movie-Display_WallMounted_01"),
-        "class_token": "Shelf_Movie-Display_WallMounted_01_C",
-        "mesh_path": "/Game/VideoStore/asset/meshes/LA_DisplayWall_Movie_A_01",
-        "mesh_name": "LA_DisplayWall_Movie_A_01",
-        "cdo_title_key": "Interface_Product_Shelf_MovieDisplay-WallMounted",
-        "thumb_path": ("/Game/VideoStore/asset/prop/decoration/Movie-Display/"
-                       "T_Decoration_Shelf_Movie-Display_WallMounted_01_T"),
-        "thumb_name": "T_Decoration_Shelf_Movie-Display_WallMounted_01_T",
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/PosterFrame",
+        "asset": "PosterFrame",
+        "self_path": "/Game/VideoStore/asset/prop/PosterFrame/PosterFrame",
+        "class_token": "PosterFrame_C",
+        "mesh_path": "/Game/VideoStore/asset/meshes/LA_PosterFrame_Big_01",
+        "mesh_name": "LA_PosterFrame_Big_01",
+        "cdo_title_key": "Interface_Product_Decoration_Frame",
+        "thumb_path": "/Game/VideoStore/asset/prop/PosterFrame/T_PosterFrame_01_T",
+        "thumb_name": "T_PosterFrame_01_T",
         "default_price": 100.0,
     },
 }
