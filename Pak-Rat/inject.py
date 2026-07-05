@@ -481,9 +481,95 @@ EXEMPLARS = {
             "name": "T_PinBall_A_01_bc",
         },
     },
+    # --- Container (snack/drink/toy): 2-TIER. The catalogue sells a vending BOX
+    # (SnackBox_Snack_C) whose CDO holds an ARRAY of product-CLASS refs (the shelf
+    # it dispenses). TIER 1 = the PRODUCT (Snack_Candy-A_C -> Snack_Base_C) is a
+    # couch/arcade-style item: name-map mesh swap + Product Name title-key + Image
+    # Thumbnail (all the fields above map to the PRODUCT). TIER 2 = the BOX, in
+    # `box` below: clone it, rename its product-class ref to the cloned product,
+    # box_repoint ALL shelf slots to that product, and register THE BOX in the
+    # Container catalogue fn. NOTE for the pipeline (build_added_item Container
+    # branch — Ares to wire): the product CDO stores thumbnail refs (NOT a price
+    # double) right after the title-key, so setcdo MUST be name-only (price=None)
+    # for products or it corrupts the thumbnail; product Price is inherited from
+    # Snack_Base_C (custom per-product price = a separate add-property step).
+    # drink/toy = identical shape; fill their product-class specifics via the same
+    # decode (drink product-class + LA_ mesh + Interface_Product_* key; toy same).
+    "snack": {
+        "id": "snack", "label": "Snack (vending box)", "placement": "floor",
+        "category": "Container",
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/Snack/Candy",
+        "asset": "Snack_Candy-A",
+        "self_path": "/Game/VideoStore/asset/prop/Snack/Candy/Snack_Candy-A",
+        "class_token": "Snack_Candy-A_C",
+        "mesh_path": "/Game/VideoStore/asset/meshes/LA_Candy_Box_A_01",
+        "mesh_name": "LA_Candy_Box_A_01",
+        # 32 chars -> item token = 32 - _TITLE_AFFIX(23) = 9 (length-neutral setcdo).
+        "cdo_title_key": "Interface_Product_Snack_CandyBar",
+        "thumb_path": "/Game/VideoStore/asset/prop/Snack/Snack/T_Snack_Chocolat-A_T",
+        "thumb_name": "T_Snack_Chocolat-A_T",
+        "default_price": 2.0,
+        "widget_sibling": "SnackBox_Snack_C",
+        # TIER 2 — the vending box (the actual catalogue item).
+        "box": {
+            "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/Snack",
+            "asset": "SnackBox_Snack",
+            "self_path": "/Game/VideoStore/asset/prop/Snack/SnackBox_Snack",
+            "class_token": "SnackBox_Snack_C",
+            "product_class": "Snack_Candy-A_C",   # array element renamed to <item>_C
+        },
+    },
+    # Toy vending box — the PRODUCT owns its mesh (custom mesh OK); name is DERIVED
+    # (product inherits Toys_Base_C, no title-key). Box parent = SnackBox_C.
+    "toy": {
+        "id": "toy", "label": "Toy (vending box)", "placement": "floor",
+        "category": "Container",
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/toys/Toys",
+        "asset": "Toys_ToysShelf_A_01",
+        "self_path": "/Game/VideoStore/asset/prop/toys/Toys/Toys_ToysShelf_A_01",
+        "class_token": "Toys_ToysShelf_A_01_C",
+        "mesh_path": "/Game/VideoStore/asset/meshes/LA_Toy_ToyShelf_A_01",
+        "mesh_name": "LA_Toy_ToyShelf_A_01",
+        # no cdo_title_key -> setcdo skipped, derived name.
+        "default_price": 2.0,
+        "widget_sibling": "ToysBox_C",
+        "box": {
+            "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/toys",
+            "asset": "ToysBox",
+            "self_path": "/Game/VideoStore/asset/prop/toys/ToysBox",
+            "class_token": "ToysBox_C",
+            "product_class": "Toys_ToysShelf_A_01_C",
+        },
+    },
+    # Drink vending box — product mesh INHERITS Drink_Base_C so keep_mesh (no custom
+    # drink mesh without a Base decode); name DERIVED (no title-key). Box = DrinkBox,
+    # parent SnackBox_Drink_C. (Full custom name+mesh = follow-up Base decode.)
+    "drink": {
+        "id": "drink", "label": "Drink (vending box)", "placement": "floor",
+        "category": "Container", "keep_mesh": True,
+        "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/fridge/Soda",
+        "asset": "Soda_Can-A_01",
+        "self_path": "/Game/VideoStore/asset/prop/fridge/Soda/Soda_Can-A_01",
+        "class_token": "Soda_Can-A_01_C",
+        # keep_mesh: mesh ref unused; mesh_name set for _slot_tokens length math only.
+        "mesh_path": "/Game/VideoStore/asset/meshes/Soda_Can-A_01",
+        "mesh_name": "Soda_Can-A_01",
+        "thumb_path": "/Game/VideoStore/asset/prop/fridge/Soda/T_Soda_Can-A_01_T",
+        "thumb_name": "T_Soda_Can-A_01_T",
+        # no cdo_title_key -> derived name.
+        "default_price": 2.0,
+        "widget_sibling": "DrinkBox_C",
+        "box": {
+            "pak_dir": "RetroRewind/Content/VideoStore/asset/prop/fridge",
+            "asset": "DrinkBox",
+            "self_path": "/Game/VideoStore/asset/prop/fridge/DrinkBox",
+            "class_token": "DrinkBox_C",
+            "product_class": "Soda_Can-A_01_C",
+        },
+    },
 }
 
-DEFAULT_EXEMPLAR = {"Decoration": "couch", "Equipmement": "arcade"}
+DEFAULT_EXEMPLAR = {"Decoration": "couch", "Equipmement": "arcade", "Container": "snack"}
 
 
 def exemplars_for(category: str) -> list[dict]:
@@ -510,7 +596,7 @@ LOG = r"%(log)s"
 def note(m):
     try: open(LOG, "a").write(str(m) + "\n")
     except Exception: pass
-FBX = r"%(fbx)s"; PKG = "%(pkg)s"; NM = "%(name)s"
+FBX = r"%(fbx)s"; PKG = "%(pkg)s"; NM = "%(name)s"; PLACE = "%(place)s"
 at = unreal.AssetToolsHelpers.get_asset_tools()
 try:
     opt = unreal.FbxImportUI()
@@ -523,23 +609,41 @@ try:
     task.filename = FBX; task.destination_path = PKG; task.destination_name = NM
     task.replace_existing = True; task.automated = True; task.save = True; task.options = opt
     at.import_asset_tasks([task])
-    # The wall-placement ghost traces against the mesh's SIMPLE collision; without a
-    # clean collision volume it won't 'stick' to a wall. Force a box simple collision
-    # (flush against the wall) so arbitrary user meshes wall-mount like the poster.
-    # Non-fatal — a mesh that imports but can't take collision still cooks.
+    # Wall vs floor need DIFFERENT collision. The wall-placement ghost traces against
+    # the mesh's SIMPLE collision. The vanilla PosterFrame uses a THIN, mesh-following
+    # CONVEX (single hull, ~15cm deep, biased BEHIND the mount plane); a symmetric BOX
+    # gets rejected by real walls (only the locker's flat top accepts a box) — the
+    # "locker yes, walls no" bug. So wall items get a mesh-derived convex; floor items
+    # keep the cheap box. Non-fatal — a mesh that can't take collision still cooks.
     mesh = unreal.load_asset(PKG + "/" + NM)
     if mesh is not None:
+        sub = None
+        try: sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        except Exception: sub = None
         try:
-            sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
-            try: sub.remove_collisions(mesh)
-            except Exception: pass
-            sub.add_simple_collisions(mesh, unreal.ScriptingCollisionShapeType.BOX)
-        except Exception:
+            if sub is not None: sub.remove_collisions(mesh)
+        except Exception: pass
+        if PLACE == "wall":
+            # Single convex hull from the mesh geometry — matches PosterFrame's cooked
+            # convex (thin slab following the recentered mesh, which wall_recenter has
+            # already biased to sit -11..+4cm across the wall normal like the vanilla).
             try:
-                unreal.EditorStaticMeshLibrary.add_simple_collisions(
-                    mesh, unreal.ScriptingCollisionShapeType.BOX)
+                if sub is not None:
+                    sub.set_convex_decomposition_collisions(mesh, 1, 24, 100000)
+                else:
+                    unreal.EditorStaticMeshLibrary.set_convex_decomposition_collisions(
+                        mesh, 1, 24, 100000)
             except Exception as e2:
-                note("COLLISION_WARN " + str(e2))
+                note("COLLISION_WARN convex " + str(e2))
+        else:
+            try:
+                if sub is not None:
+                    sub.add_simple_collisions(mesh, unreal.ScriptingCollisionShapeType.BOX)
+                else:
+                    unreal.EditorStaticMeshLibrary.add_simple_collisions(
+                        mesh, unreal.ScriptingCollisionShapeType.BOX)
+            except Exception as e2:
+                note("COLLISION_WARN box " + str(e2))
     unreal.EditorAssetLibrary.save_asset(PKG + "/" + NM, only_if_is_dirty=False)
     note("MESH_DONE " + PKG + "/" + NM)
 except Exception:
@@ -566,7 +670,7 @@ WIDGET_ASSET = "UI_Catalogue_Widget"
 # still ride the proven Decoration fn until their own fn+sibling are verified in-game.
 CAT_WIDGET = {
     "Decoration":  ("Return Catalogue Decoration product class", "Couch_C"),
-    "Container":   ("Return Catalogue Decoration product class", "Couch_C"),
+    "Container":   ("Return Catalogue Container product class", "SnackBox_Snack_C"),
     "Equipmement": ("Return Catalogue Equipmement product class", "Pinball-Machine_A_C"),
     "Station":     ("Return Catalogue Decoration product class", "Couch_C"),
 }
@@ -667,8 +771,48 @@ def _clone_exemplar(ex: dict, item: str, mesh: str,
             "thumb_path": new_thumb_path}
 
 
+def _clone_container_box(ex: dict, item: str, product_self: str, stage: Path) -> dict:
+    """TIER 2 (snack/drink/toy) — clone the vending BOX (the actual Container
+    catalogue item) to a new identity, repoint the product-class it references to
+    the just-cloned product (<item>_C at `product_self`), then box_repoint EVERY
+    shelf slot to that product so the box shows/dispenses only the custom product.
+    Returns {pkg_game, cls, ua} for the BOX — the entry that gets widget-registered.
+
+    Assumes ex['box'] = {pak_dir, asset, self_path, class_token, product_class}. The
+    box's name map holds the product class token AND the product's package path as
+    imports; renaming both repoints the box's product import, then box_repoint fills
+    all slots. (Best-effort scaffold — verify the two rename strings match the box's
+    name map for drink/toy before shipping.)"""
+    box = ex["box"]
+    box_item = item + "Box"
+    box_base = box["self_path"].rsplit("/", 1)[0]              # .../Snack
+    new_box_self = f"{box_base}/{box_item}/{box_item}"
+    mount_dir = "RetroRewind/Content/" + new_box_self.rsplit("/", 1)[0][len("/Game/"):]
+    dest = stage / Path(*mount_dir.split("/"))
+    dest.mkdir(parents=True, exist_ok=True)
+    out_ua = dest / f"{box_item}.uasset"
+
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="pakrat_box_"))
+    core._repak("unpack", "-f", "-o", str(tmp),
+                "-i", f"{box['pak_dir']}/{box['asset']}.uasset",
+                "-i", f"{box['pak_dir']}/{box['asset']}.uexp",
+                str(core.base_pak()))
+    src_ua = tmp / Path(*box["pak_dir"].split("/")) / f"{box['asset']}.uasset"
+
+    # New box identity + repoint the referenced product (class token + package path)
+    # to the cloned product, so slot 1 already points at it; box_repoint does the rest.
+    relink.clone(src_ua, out_ua, box["self_path"], new_box_self,
+                 box["class_token"], f"{box_item}_C",
+                 box["product_class"], f"{item}_C",
+                 ex["self_path"], product_self)
+    relink.box_repoint(out_ua, out_ua, f"Default__{box_item}_C", f"{item}_C")
+    return {"pkg_game": new_box_self, "cls": f"{new_box_self}.{box_item}_C", "ua": out_ua}
+
+
 def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
-                    stage: Path, progress=None, placement: str | None = None) -> int:
+                    stage: Path, progress=None, placement: str | None = None,
+                    skin: str | None = None) -> int:
     """Import+cook the user FBX to /Game/.../meshes/<mesh_token> and stage it.
     Returns files staged (0 => cook produced nothing)."""
     log = cook.home() / "inject_cook.log"
@@ -683,9 +827,14 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
     # against the wall (not half-buried) and its collision no longer penetrates.
     if placement == "wall":
         fbx = cook.wall_recenter(env, fbx, progress=progress)
+    # A separate user skin image → bake it onto the mesh material before the UE import
+    # (finishes the previously-deferred per-item skin for cooked adds).
+    if skin:
+        fbx = cook.apply_skin(env, fbx, skin, progress=progress)
     script = cook.project_dir() / "pakrat_mesh_import.py"
     script.write_text(_MESH_COOK_SCRIPT % {
-        "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token},
+        "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token,
+        "place": placement or ""},
         encoding="utf-8")
     if progress:
         progress(f"Importing mesh '{mesh_token}'…", None)
@@ -726,7 +875,7 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     # no user model — so there is no FBX to cook. Everything else cooks the user mesh.
     if not keep_mesh and _cook_user_mesh(
             env, fbx, mesh, stage, progress=progress,
-            placement=ex.get("placement")) == 0:
+            placement=ex.get("placement"), skin=texture) == 0:
         raise RuntimeError(
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
@@ -740,9 +889,9 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     #    a reskin hiccup falls back to the vanilla skin, never fails the add.
     mi_renames: list[str] = []
     if not keep_mesh:
-        if texture and progress:
-            progress("Note: a separate skin isn't applied yet — bake it into your "
-                     "model. Continuing…", None)
+        # A separate skin image is now baked onto the mesh during the cook
+        # (_cook_user_mesh → cook.apply_skin) — nothing deferred here anymore.
+        pass
     else:
         # Equipment body/colour: additive per-item MI reskin where the colour MIs are
         # BP-reachable (arcade), else an in-place texture override (pinball).
@@ -801,6 +950,7 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     # run_add_pipeline) AND set the price — both length-neutral in-place (the #6/#7
     # fix: token length was chosen so the key byte length is unchanged).
     p = float(price) if price is not None else ex.get("default_price", 0.0)
+    is_container = ex.get("category") == "Container"
     if keep_mesh:
         # Equipment CDO layout differs from decorations (its title key is a
         # Statistic-LevelUp key, same byte length as Interface_ModKit_<item>_Title).
@@ -812,9 +962,33 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
         except Exception as e:
             if progress:
                 progress(f"Custom equipment name/price skipped ({e}); vanilla kept.", None)
+    elif is_container:
+        # snack products own a title-key → custom NAME (name-only: a price would corrupt
+        # the thumbnail refs that sit right after the key). toy/drink products inherit
+        # from a *_Base with NO title-key → skip setcdo entirely (derived name), else
+        # _find_title_key raises and sinks the whole add.
+        if ex.get("cdo_title_key"):
+            relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
+                          _title_key(item), price=None)
     else:
         relink.setcdo(cloned["ua"], cloned["ua"], f"Default__{item}_C",
                       _title_key(item), price=p)
+
+    # TIER 2 (snack/drink/toy): the CATALOGUE item is the vending BOX, not the product.
+    # Clone the box, repoint its product-class array to the just-cloned product, and
+    # register the BOX — so the box shows/dispenses the user's custom product.
+    if is_container and ex.get("box"):
+        if progress:
+            progress("Building the vending box…", None)
+        box = _clone_container_box(ex, item, cloned["pkg_game"], stage)
+        return {"pkg": box["pkg_game"], "cls": box["cls"], "name": display_name,
+                "category": ex["category"], "price": p,
+                "sibling": ex.get("widget_sibling"),
+                # NAME is stamped on the PRODUCT CDO (Interface_ModKit_<item>_Title), not
+                # the box — carry the product token so the StringTable binds to it. Only
+                # snack products have a title-key; toy/drink are derived (name_token None).
+                "name_token": item if ex.get("cdo_title_key") else None}
+
     return {"pkg": cloned["pkg_game"], "cls": cloned["cls"], "name": display_name,
             "category": ex["category"], "price": p,
             "sibling": ex.get("widget_sibling")}
@@ -997,7 +1171,8 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
     for e in built:
         items_by_cat.setdefault(e["category"], []).append(
             {"pkg": e["pkg"], "cls": e["cls"], "name": e["name"],
-             "price": e.get("price"), "sibling": e.get("sibling")})
+             "price": e.get("price"), "sibling": e.get("sibling"),
+             "name_token": e.get("name_token")})
 
     # Register EVERY manifest item natively into the catalogue widget: start from a
     # fresh vanilla widget, chain one insert per item (each output feeds the next).
@@ -1033,7 +1208,10 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
     m = 0
     for cat, lst in items_by_cat.items():
         for it in lst:
-            item = it["pkg"].rsplit("/", 1)[-1]     # Pxxxx
+            # Container items register the BOX but stamp the name on the PRODUCT CDO
+            # (Interface_ModKit_<product-token>_Title) — bind the StringTable to that
+            # token, not the box's pkg leaf, so the custom product name resolves.
+            item = it.get("name_token") or it["pkg"].rsplit("/", 1)[-1]   # Pxxxx
             out_st = stmp / f"st_{m}.uasset"
             relink.staddkey(cur_st, out_st, _title_key(item), it["name"])
             cur_st = out_st

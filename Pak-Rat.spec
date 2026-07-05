@@ -34,6 +34,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['Pak-Rat\\Pak-Rat.ico'],
+    version='Pak-Rat\\version_info.txt',
 )
 coll = COLLECT(
     exe,

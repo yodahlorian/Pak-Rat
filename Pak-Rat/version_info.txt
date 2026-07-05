@@ -1,0 +1,33 @@
+# PyInstaller version resource for Pak-Rat.exe.
+# Purpose: give the unsigned binary a real Win32 version resource (publisher,
+# product, version, copyright). An exe with NO version info scores worst on
+# Defender heuristics and shows as a blank "unknown publisher" in SmartScreen.
+# A stable CompanyName/ProductName across builds also lets reputation accrue.
+# Bump filevers/prodvers + ProductVersion each beta.
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(3, 0, 0, 27),
+    prodvers=(3, 0, 0, 27),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0', [
+        StringStruct('CompanyName', 'Pak-Rat'),
+        StringStruct('FileDescription', 'Pak-Rat - RetroRewind mod asset injector'),
+        StringStruct('FileVersion', '3.0.0.27'),
+        StringStruct('InternalName', 'Pak-Rat'),
+        StringStruct('LegalCopyright', '(c) 2026 Yodah'),
+        StringStruct('OriginalFilename', 'Pak-Rat.exe'),
+        StringStruct('ProductName', 'Pak-Rat'),
+        StringStruct('ProductVersion', '3.0.0-beta27')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

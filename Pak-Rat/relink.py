@@ -230,6 +230,48 @@ def setcdo(in_ua, out_ua, cdo_name: str, new_key: str,
 
 
 # ---------------------------------------------------------------------------
+# box_repoint — retarget a vending-box's product-class ARRAY to one product.
+#
+# Snack/drink/toy catalogue items are 2-TIER: the catalogue sells a vending BOX
+# (SnackBox_Snack_C / DrinkBox_C / ToysBox_C) whose CDO holds an ARRAY of product
+# BP-class refs (the shelf it dispenses). The box CDO is a RawExport whose blob
+# contains, as one property value, [int32 N][N x int32 FPackageIndex] — each
+# element an import ref to a product class. We overwrite EVERY element with the
+# import index of `product_cls` (the user's cloned product), so the box shows /
+# dispenses only the custom product. Length-neutral (indices only), nothing shifts.
+# ---------------------------------------------------------------------------
+def box_repoint(in_ua, out_ua, box_cdo_name: str, product_cls: str) -> None:
+    asset = _open(in_ua)
+    j = _imp_index(asset, product_cls)
+    if j < 0:
+        raise RuntimeError(f"box_repoint: product class '{product_cls}' is not an import")
+    raw_index = -(j + 1)                       # FPackageIndex for import j
+    n_imports = asset.Imports.Count
+    cdo = next(e for e in asset.Exports if e.ObjectName.ToString() == box_cdo_name)
+    d = bytearray(bytes(cdo.Data))
+    # Locate the array: an int32 count C (2..128) immediately followed by C int32s
+    # that are ALL valid import indices (-n_imports..-1). The product-class array is
+    # the only run of that shape in the blob.
+    off = None
+    i = 0
+    while i + 4 <= len(d):
+        c = struct.unpack_from("<i", d, i)[0]
+        if 2 <= c <= 128 and i + 4 + 4 * c <= len(d) and all(
+                -n_imports <= struct.unpack_from("<i", d, i + 4 + 4 * k)[0] <= -1
+                for k in range(c)):
+            off, count = i + 4, c
+            break
+        i += 1
+    if off is None:
+        raise RuntimeError("box_repoint: product-class array not found in box CDO blob")
+    for k in range(count):
+        struct.pack_into("<i", d, off + 4 * k, raw_index)
+    from System import Array, Byte
+    cdo.Data = Array[Byte](bytes(d))
+    asset.Write(str(out_ua))
+
+
+# ---------------------------------------------------------------------------
 # staddkey — add a key -> display-name pair to the Interface StringTable.
 # The parsed StringTableExport.Table is a clean map (chainable across items).
 # ---------------------------------------------------------------------------

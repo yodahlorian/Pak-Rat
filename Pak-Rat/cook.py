@@ -616,6 +616,54 @@ print("PAKRAT_WALLRECENTER", out)
 
 
 # ---------------------------------------------------------------------------
+# Skin baking — apply a user-supplied SEPARATE skin image to the mesh's material
+# in Blender so the cooked StaticMesh wears it. The ADD cook imports FBX materials
+# (import_materials=True), so a material with the skin as its base colour rides into
+# UE. This finishes the previously-deferred per-item skin for cooked (non-equipment)
+# added meshes — the user can now supply a texture image OR bake it into the model.
+# ---------------------------------------------------------------------------
+_SKIN_SCRIPT = r'''
+import bpy, sys
+inp, out, img = sys.argv[-3], sys.argv[-2], sys.argv[-1]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=inp)
+image = bpy.data.images.load(img)
+mat = bpy.data.materials.new("PakRatSkin")
+mat.use_nodes = True
+nt = mat.node_tree
+bsdf = nt.nodes.get("Principled BSDF")
+tex = nt.nodes.new("ShaderNodeTexImage")
+tex.image = image
+if bsdf is not None:
+    nt.links.new(bsdf.inputs["Base Color"], tex.outputs["Color"])
+for o in bpy.context.scene.objects:
+    if o.type == "MESH":
+        o.data.materials.clear()
+        o.data.materials.append(mat)
+bpy.ops.export_scene.fbx(filepath=out, use_selection=False, object_types={"MESH"},
+    path_mode="COPY", embed_textures=True, add_leaf_bones=False)
+print("PAKRAT_SKIN", out)
+'''
+
+
+def apply_skin(env: "CookEnv", fbx: str, image: str, progress=None) -> str:
+    """Bake `image` onto the mesh's material via Blender and return the skinned FBX.
+    Best-effort: returns the original FBX unchanged on any failure (never fatal)."""
+    if progress:
+        progress("Applying your skin to the model…", None)
+    out = str(home() / "_convert" / (Path(fbx).stem + "_skin.fbx"))
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    script = home() / "_applyskin.py"
+    script.write_text(_SKIN_SCRIPT, encoding="utf-8")
+    try:
+        core._run([env.blender_exe, "--background", "--python", str(script),
+                   "--", fbx, out, image])
+    except Exception:
+        return fbx
+    return out if os.path.isfile(out) else fbx
+
+
+# ---------------------------------------------------------------------------
 # Embedded-texture extraction (v2.0.8)
 #
 # Many user models (esp. GLB, and FBX with embedded media) carry their own

@@ -31,6 +31,11 @@ FORMATS = {
     "fbx":     ".fbx",
     "obj":     ".obj",
     "gltf":    ".glb",
+    "glb":     ".glb",
+    "stl":     ".stl",
+    "ply":     ".ply",
+    "dae":     ".dae",
+    "blend":   ".blend",
 }
 GEOMETRY_FORMATS = ("uasset",) + tuple(FORMATS)   # "uasset" = raw cooked (no reader)
 
@@ -137,6 +142,14 @@ if e == "obj":
     bpy.ops.wm.obj_export(filepath=out)
 elif e in ("gltf", "glb"):
     bpy.ops.export_scene.gltf(filepath=out, export_format="GLB")
+elif e == "stl":
+    bpy.ops.wm.stl_export(filepath=out)
+elif e == "ply":
+    bpy.ops.wm.ply_export(filepath=out)
+elif e == "dae":
+    bpy.ops.wm.collada_export(filepath=out)
+elif e == "blend":
+    bpy.ops.wm.save_as_mainfile(filepath=out, copy=True)
 else:  # fbx
     bpy.ops.export_scene.fbx(filepath=out, use_selection=False,
         object_types={"MESH"}, add_leaf_bones=False, path_mode="COPY")
@@ -204,3 +217,204 @@ def export_mesh(mount: str, dest_dir: str, fmt: str, progress=None) -> list[str]
         return written
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+
+
+def _load_texture(mount: str):
+    """Load the UTexture2D export from the package at `mount` (no extension)."""
+    pkg = _provider().LoadPackage(mount)
+    from CUE4Parse.UE4.Assets.Exports.Texture import UTexture2D
+    for i in range(400):
+        try:
+            e = pkg.GetExport(i)
+        except Exception:  # noqa: BLE001  (index past the end throws)
+            break
+        if isinstance(e, UTexture2D):
+            return e
+    raise RuntimeError(f"no Texture2D export found in '{mount}'")
+
+
+# Raster image formats the extractor can write (Pillow-backed) — parity with the
+# importer's accepted images. DDS is handled specially (exact cooked BC via raw).
+IMAGE_FORMATS = ("png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp", "gif")
+
+
+def export_texture(mount: str, dest_dir: str, fmt: str = "png",
+                   progress=None) -> list[str]:
+    """Extract the cooked UTexture2D at `mount` into `dest_dir/<leaf>/` as an image.
+
+    Decodes via CUE4Parse-Conversion's TextureDecoder (the reader FModel uses) to a
+    SkiaSharp bitmap, writes a PNG, then (for any non-PNG raster `fmt`) converts that
+    PNG to the requested format with Pillow — png/jpg/bmp/tga/tiff/webp/gif parity with
+    the importer's accepted images. Returns written paths; raises on failure.
+    """
+    leaf = mount.rstrip("/").split("/")[-1]
+    fmt = (fmt or "png").lower().lstrip(".")
+    if fmt == "jpeg":
+        fmt = "jpg"
+    if progress:
+        progress(f"Reading {leaf} (texture)…")
+    tex = _load_texture(mount)
+
+    from CUE4Parse.UE4.Assets.Exports.Texture import ETexturePlatform
+    from CUE4Parse_Conversion.Textures import TextureDecoder
+    from SkiaSharp import SKEncodedImageFormat, SKImage
+    from System.IO import File
+
+    bmp = TextureDecoder.Decode(tex, ETexturePlatform.DesktopMobile)
+    if bmp is None:
+        raise RuntimeError(f"CUE4Parse could not decode texture '{leaf}'")
+
+    out_dir = os.path.join(dest_dir, leaf)
+    os.makedirs(out_dir, exist_ok=True)
+    png_path = os.path.join(out_dir, leaf + ".png")
+    File.WriteAllBytes(
+        png_path,
+        SKImage.FromBitmap(bmp).Encode(SKEncodedImageFormat.Png, 100).ToArray())
+    if fmt in ("png", ""):
+        return [png_path]
+
+    # convert the decoded PNG to the requested raster format via Pillow; drop the PNG
+    out = os.path.join(out_dir, f"{leaf}.{fmt}")
+    from PIL import Image
+    try:
+        im = Image.open(png_path)
+        if fmt in ("jpg", "jfif", "jpe"):
+            im = im.convert("RGB")          # JPEG has no alpha channel
+        im.save(out)
+        im.close()
+    finally:
+        try:
+            os.remove(png_path)
+        except OSError:
+            pass
+    return [out]
+
+
+# ---------------------------------------------------------------------------
+# Source enumeration — group the mounted VFS by owning pak so the extractor can
+# offer "base game" vs a chosen downloaded mod (the ~mods paks). Every file's
+# source pak is its FPakEntry.Vfs.Name (verified: base = RetroRewind-Windows.pak,
+# each ~mods/*.pak = one downloaded mod).
+# ---------------------------------------------------------------------------
+BASE_PAK_PREFIX = "RetroRewind-Windows"
+
+
+def list_mod_paks() -> list[str]:
+    """Source-pak names of the user's downloaded mods — every mounted pak except the
+    base RetroRewind pak (i.e. the ~mods/*.pak files). Sorted."""
+    prov = _provider()
+    names = set()
+    for kv in prov.Files:
+        try:
+            v = kv.Value.Vfs.Name
+        except Exception:  # noqa: BLE001
+            continue
+        if v and not v.startswith(BASE_PAK_PREFIX):
+            names.add(v)
+    return sorted(names)
+
+
+def list_assets(source_pak: str) -> dict:
+    """Extractable meshes + textures in ONE source pak, as mount paths (no extension).
+
+    Classifies each .uasset by its export type (UStaticMesh vs UTexture2D) — accurate,
+    and cheap for mod-sized paks (dozens of files). Intended for a chosen downloaded
+    mod (`source_pak` from list_mod_paks); base-game listing stays on the prebuilt
+    core.load_meshes()/load_assets() manifests (21k+ files — too many to load here).
+    Returns {'meshes': [...], 'textures': [...]} sorted.
+    """
+    prov = _provider()
+    from CUE4Parse.UE4.Assets.Exports.StaticMesh import UStaticMesh
+    from CUE4Parse.UE4.Assets.Exports.Texture import UTexture2D
+    meshes, textures = [], []
+    for kv in prov.Files:
+        gf, k = kv.Value, kv.Key
+        if not k.lower().endswith(".uasset"):
+            continue
+        try:
+            if gf.Vfs.Name != source_pak:
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        mount = k[:-len(".uasset")]
+        try:
+            pkg = prov.LoadPackage(mount)
+        except Exception:  # noqa: BLE001  (broken/partial asset — skip)
+            continue
+        kind = None
+        for i in range(400):
+            try:
+                e = pkg.GetExport(i)
+            except Exception:  # noqa: BLE001  (index past the end throws)
+                break
+            if isinstance(e, UStaticMesh):
+                kind = "mesh"
+                break
+            if isinstance(e, UTexture2D):
+                kind = "texture"
+                break
+        if kind == "mesh":
+            meshes.append(mount)
+        elif kind == "texture":
+            textures.append(mount)
+    return {"meshes": sorted(meshes), "textures": sorted(textures)}
+
+
+def _classify_export(mount: str) -> "str | None":
+    """'mesh' | 'texture' | None for the package at `mount`, by export type."""
+    from CUE4Parse.UE4.Assets.Exports.StaticMesh import UStaticMesh
+    from CUE4Parse.UE4.Assets.Exports.Texture import UTexture2D
+    try:
+        pkg = _provider().LoadPackage(mount)
+    except Exception:  # noqa: BLE001
+        return None
+    for i in range(400):
+        try:
+            e = pkg.GetExport(i)
+        except Exception:  # noqa: BLE001  (index past the end throws)
+            break
+        if isinstance(e, UStaticMesh):
+            return "mesh"
+        if isinstance(e, UTexture2D):
+            return "texture"
+    return None
+
+
+def _save_raw(mount: str, dest_dir: str, progress=None) -> list[str]:
+    """Save the raw cooked sidecars (.uasset/.uexp/.ubulk) for `mount` straight out of
+    the mounted provider — works for BASE and ~mods paks (unlike the base-pak repak
+    route). Returns written paths."""
+    prov = _provider()
+    leaf = mount.rstrip("/").split("/")[-1]
+    out_dir = os.path.join(dest_dir, leaf)
+    os.makedirs(out_dir, exist_ok=True)
+    from System.IO import File
+    written = []
+    data = prov.SavePackage(mount)          # {vfs-path: byte[]} for every sidecar
+    for kv in data:
+        ext = kv.Key.rsplit(".", 1)[-1].lower()
+        if ext not in ("uasset", "uexp", "ubulk"):
+            continue
+        out = os.path.join(out_dir, leaf + "." + ext)
+        File.WriteAllBytes(out, kv.Value)
+        written.append(out)
+    return written
+
+
+def export_any(mount: str, dest_dir: str, tex_fmt: str = "png",
+               mesh_fmt: str = "uemodel", progress=None) -> list[str]:
+    """Provider-based extract of ANY asset — works for BASE *and* ~mods paks (the
+    provider mounts them all, so this reaches assets the base-pak repak route can't).
+
+    Textures -> PNG; static meshes -> geometry (`mesh_fmt`) unless mesh_fmt=='uasset';
+    everything else / 'uasset' -> raw cooked sidecars. This is the ~mods extraction
+    path (letting users pull assets out of downloaded mods to combine them).
+    """
+    kind = _classify_export(mount)
+    if kind == "texture":
+        if (tex_fmt or "").lower().lstrip(".") == "dds":
+            return _save_raw(mount, dest_dir, progress=progress)  # exact cooked BC + mips
+        return export_texture(mount, dest_dir, tex_fmt, progress=progress)
+    if kind == "mesh" and mesh_fmt and mesh_fmt != "uasset":
+        return export_mesh(mount, dest_dir, mesh_fmt, progress=progress)
+    return _save_raw(mount, dest_dir, progress=progress)

@@ -44,7 +44,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY, \
-    PAGE_ADDEXEMPLAR = range(18)
+    PAGE_ADDEXEMPLAR, PAGE_EXTRACTSRC = range(19)
 
 APP_VERSION = core.APP_VERSION   # single source of truth lives in core.py
 
@@ -579,6 +579,9 @@ class ModePage(QWizardPage):
         # Combine has no single-asset picker — straight to choosing source paks.
         if mode == "combine":
             return PAGE_COMBINESRC
+        # Extract first asks WHERE to pull from (base game vs a ~mods pak).
+        if mode == "extract":
+            return PAGE_EXTRACTSRC
         return PAGE_ASSET
 
 
@@ -640,7 +643,7 @@ class AssetPage(QWizardPage):
         mode = getattr(self.wizard(), "mode", "regular")
         mesh_like = mode in ("mesh", "cook")
         if mode == "extract":           # extract works on meshes AND textures
-            items = sorted(set(core.load_meshes()) | set(core.load_assets()))
+            items = extract_source_items(self.wizard())
         else:
             items = core.load_meshes() if mesh_like else core.load_assets()
         self._resolved_for = None
@@ -709,6 +712,76 @@ class AssetPage(QWizardPage):
         if mode == "mesh":
             return PAGE_EXTRACT
         return PAGE_TEXLIST
+
+
+# ---------------------------------------------------------------------------
+# Extract source — base game vs a downloaded ~mods pak. Lets users pull assets
+# out of installed mods (e.g. combine several arcade mods into one source).
+# ---------------------------------------------------------------------------
+def extract_source_items(wiz) -> list:
+    """Mesh + texture mounts for the extractor's chosen source. Base game -> the
+    prebuilt clean lists; a downloaded mod -> live enumeration of that ~mods pak."""
+    src = getattr(wiz, "extract_source", None)
+    if src:
+        import extract_mesh
+        a = extract_mesh.list_assets(src)
+        return sorted(set(a["meshes"]) | set(a["textures"]))
+    return sorted(set(core.load_meshes()) | set(core.load_assets()))
+
+
+class ExtractSourcePage(QWizardPage):
+    """Choose WHERE to extract from: the base game, or one installed mod (~mods/*.pak)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Choose a source to extract from")
+        self.setSubTitle("The base game, or one of your installed mods (~mods).")
+        self.rb_base = QRadioButton("Base game")
+        self.rb_base.setChecked(True)
+        self.rb_mod = QRadioButton("A downloaded mod (~mods)")
+        self.combo = QComboBox()
+        self.combo.setEnabled(False)
+        self.combo.setMaximumWidth(420)
+        self.combo.currentIndexChanged.connect(lambda *_: self.completeChanged.emit())
+        self._loaded = False
+        self.rb_base.toggled.connect(self._on_toggle)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.rb_base)
+        lay.addWidget(self.rb_mod)
+        lay.addWidget(self.combo)
+        lay.addStretch(1)
+
+    def _on_toggle(self, *_):
+        mod = self.rb_mod.isChecked()
+        self.combo.setEnabled(mod)
+        if mod and not self._loaded:
+            self._load_mods()
+        self.completeChanged.emit()
+
+    def _load_mods(self):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            import extract_mesh
+            mods = extract_mesh.list_mod_paks()
+        except Exception:
+            mods = []
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.combo.clear()
+        self.combo.addItems(mods)
+        self.combo.setCurrentIndex(0 if mods else -1)
+        self._loaded = True
+
+    def isComplete(self):
+        return self.rb_base.isChecked() or bool(self.combo.currentText().strip())
+
+    def validatePage(self):
+        self.wizard().extract_source = (
+            None if self.rb_base.isChecked() else self.combo.currentText().strip())
+        return True
+
+    def nextId(self):
+        return PAGE_ASSET
 
 
 # ---------------------------------------------------------------------------
@@ -1278,8 +1351,8 @@ class AddInputPage(QWizardPage):
         self.price_edit.setPlaceholderText("Price (whole number, e.g. 100)")
 
         self.tex_btn = QPushButton("Choose a texture (model skin)…")
-        self.tex_lbl = QLabel("Skin swap is coming — for now, bake the texture into "
-                              "your model. (This picker is a no-op this build.)")
+        self.tex_lbl = QLabel("Optional — paints this image onto your model as its "
+                              "skin. Blank keeps the model's own textures.")
         self.tex_lbl.setStyleSheet("color:#888;")
         # Second (optional) equipment texture: the machine's screen / display.
         self.screen_btn = QPushButton("Choose a screen / display texture…")
@@ -1420,8 +1493,8 @@ class AddInputPage(QWizardPage):
                                  "vanilla skin.")
         else:
             self.tex_btn.setText("Choose a texture (model skin)…")
-            self.tex_lbl.setText("Skin swap is coming — for now, bake the texture into "
-                                 "your model. (This picker is a no-op this build.)")
+            self.tex_lbl.setText("Optional — paints this image onto your model as its "
+                                 "skin. Blank keeps the model's own textures.")
         self.tex_lbl.setStyleSheet("color:#888;")
         self.tex_btn.setVisible(True)
         self.tex_lbl.setVisible(True)
@@ -1509,7 +1582,7 @@ class AddInputPage(QWizardPage):
         self.pick_lbl.setText("No model selected.")
         self.name_edit.clear()
         self.price_edit.clear()
-        self.tex_lbl.setText("Skin swap is coming — bake the texture into your model.")
+        self.tex_lbl.setText("Optional — paints this image onto your model as its skin.")
         self.screen_lbl.setText("Optional — replaces the machine's video-screen texture.")
         self.thumb_lbl.setText("Optional — reuses the base item's icon if left blank.")
 
@@ -2260,6 +2333,12 @@ class ExtractListPage(QWizardPage):
         self.add_btn.clicked.connect(self._add_another)
         self.fmt = QComboBox()
         self.fmt.addItem("PNG — easy to edit (recommended)", "png")
+        self.fmt.addItem("TGA", "tga")
+        self.fmt.addItem("BMP", "bmp")
+        self.fmt.addItem("TIFF", "tiff")
+        self.fmt.addItem("WebP", "webp")
+        self.fmt.addItem("GIF", "gif")
+        self.fmt.addItem("JPEG", "jpg")
         self.fmt.addItem("DDS — exact format + mips (for re-injection)", "dds")
         self.fmt.setMaximumWidth(360)
 
@@ -2269,6 +2348,10 @@ class ExtractListPage(QWizardPage):
         self.mesh_fmt.addItem("FBX — universal (converted via Blender)", "fbx")
         self.mesh_fmt.addItem("OBJ — simple geometry (via Blender)", "obj")
         self.mesh_fmt.addItem("glTF (.glb)", "gltf")
+        self.mesh_fmt.addItem("STL", "stl")
+        self.mesh_fmt.addItem("PLY", "ply")
+        self.mesh_fmt.addItem("Collada (.dae)", "dae")
+        self.mesh_fmt.addItem("Blender (.blend)", "blend")
         self.mesh_fmt.addItem("Keep raw cooked .uasset", "uasset")
         self.mesh_fmt.setMaximumWidth(360)
 
@@ -2327,7 +2410,8 @@ class ExtractListPage(QWizardPage):
             self._add_row(primary, removable=False)
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                rel = core.related_assets(primary)
+                rel = ([] if getattr(self.wizard(), "extract_source", None)
+                       else core.related_assets(primary))
             except Exception:
                 rel = []
             finally:
@@ -2385,7 +2469,7 @@ class ExtractListPage(QWizardPage):
         self.completeChanged.emit()
 
     def _add_another(self):
-        items = sorted(set(core.load_meshes()) | set(core.load_assets()))
+        items = extract_source_items(self.wizard())
         mount = GroupedPickerDialog.pick(self, items, "Add an asset")
         if mount:
             self._add_row(mount.strip(), removable=True)
@@ -2407,18 +2491,19 @@ class ExtractSaveWorker(QThread):
     done = Signal(list)        # written file paths
     failed = Signal(str)
 
-    def __init__(self, assets, dest, fmt, mesh_fmt="uasset"):
+    def __init__(self, assets, dest, fmt, mesh_fmt="uasset", source=None):
         super().__init__()
         self.assets = assets
         self.dest = dest
         self.fmt = fmt
         self.mesh_fmt = mesh_fmt
+        self.source = source
 
     def run(self):
         try:
             written = core.export_assets(self.assets, self.dest, self.fmt,
                                          progress=self.status.emit,
-                                         mesh_fmt=self.mesh_fmt)
+                                         mesh_fmt=self.mesh_fmt, source=self.source)
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
         else:
@@ -2450,7 +2535,8 @@ class ExtractProgressPage(QWizardPage):
         self.worker = ExtractSaveWorker(page.selected_assets(),
                                         getattr(wiz, "extract_dest", ""),
                                         page.selected_format(),
-                                        page.selected_mesh_format())
+                                        page.selected_mesh_format(),
+                                        getattr(wiz, "extract_source", None))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self._on_done)
         self.worker.failed.connect(self._on_fail)
@@ -2832,6 +2918,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_COMBINESEL, CombineSelectPage())
         self.setPage(PAGE_ADDCATEGORY, AddCategoryPage())
         self.setPage(PAGE_ADDINPUT, AddInputPage())
+        self.setPage(PAGE_EXTRACTSRC, ExtractSourcePage())
         self.setStartId(PAGE_MODE)
 
         # On the final "Done" page, Back should start the whole flow over at

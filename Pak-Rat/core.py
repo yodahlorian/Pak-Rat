@@ -568,7 +568,8 @@ def related_assets(asset: str, limit: int = 16) -> list[str]:
 
 
 def export_assets(assets: list[str], dest_dir: str, fmt: str = "png",
-                  progress=None, mesh_fmt: str = "uasset") -> list[str]:
+                  progress=None, mesh_fmt: str = "uasset",
+                  source: "str | None" = None) -> list[str]:
     """Extract several assets to dest_dir. Textures are decoded to `fmt`
     (PNG/DDS). Meshes are exported as geometry per `mesh_fmt`
     (uemodel/fbx/obj/gltf via CUE4Parse) unless mesh_fmt == 'uasset', in which
@@ -583,12 +584,22 @@ def export_assets(assets: list[str], dest_dir: str, fmt: str = "png",
         if progress:
             progress(f"Extracting {leaf}  ({i}/{len(assets)})…")
         try:
+            if source:            # ~mods pak — provider-based extract reaches mod assets
+                import extract_mesh                # (base-pak repak route can't)
+                written += extract_mesh.export_any(asset, dest_dir, fmt, mesh_fmt,
+                                                   progress=progress)
+                continue
             if _classify(asset) == "mesh" and mesh_fmt and mesh_fmt != "uasset":
                 import extract_mesh
                 written += extract_mesh.export_mesh(asset, dest_dir, mesh_fmt,
                                                     progress=progress)
                 continue
             if _classify(asset) == "texture":
+                if fmt.lower().lstrip(".") not in EXPORT_FORMATS:
+                    import extract_mesh          # tiff/webp/… → provider decoder + Pillow
+                    written += extract_mesh.export_texture(asset, dest_dir, fmt,
+                                                           progress=progress)
+                    continue
                 spec = None
                 try:
                     spec = prepare_target(asset)
