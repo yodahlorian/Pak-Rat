@@ -39,6 +39,15 @@ import core  # noqa: E402
 import cook  # noqa: E402  (v2 UE cooking toolchain)
 import inject  # noqa: E402  (v3 "Add Asset" runtime injection engine)
 
+
+def _row(*parts):
+    """Horizontal row: (widget, stretch) pairs → a QHBoxLayout. Module-level so any
+    page can use it (AddInputPage keeps a local copy that shadows this harmlessly)."""
+    h = QHBoxLayout()
+    for w, stretch in parts:
+        h.addWidget(w, stretch)
+    return h
+
 # Page ids
 PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, \
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
