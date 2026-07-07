@@ -624,18 +624,45 @@ print("PAKRAT_WALLRECENTER", out)
 # ---------------------------------------------------------------------------
 _SKIN_SCRIPT = r'''
 import bpy, sys
-inp, out, img = sys.argv[-3], sys.argv[-2], sys.argv[-1]
+# args: in.fbx  out.fbx  base_color  normal  packed_mask   (each a map path, or "-")
+inp, out, bc, nrm, ram = (sys.argv[-5], sys.argv[-4], sys.argv[-3],
+                          sys.argv[-2], sys.argv[-1])
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.fbx(filepath=inp)
-image = bpy.data.images.load(img)
 mat = bpy.data.materials.new("PakRatSkin")
 mat.use_nodes = True
 nt = mat.node_tree
 bsdf = nt.nodes.get("Principled BSDF")
-tex = nt.nodes.new("ShaderNodeTexImage")
-tex.image = image
+
+def _img(path, non_color):
+    im = bpy.data.images.load(path)
+    if non_color:
+        try: im.colorspace_settings.name = "Non-Color"
+        except Exception: pass
+    t = nt.nodes.new("ShaderNodeTexImage")
+    t.image = im
+    return t
+
 if bsdf is not None:
-    nt.links.new(bsdf.inputs["Base Color"], tex.outputs["Color"])
+    if bc != "-":
+        nt.links.new(bsdf.inputs["Base Color"], _img(bc, False).outputs["Color"])
+    if nrm != "-":
+        nmap = nt.nodes.new("ShaderNodeNormalMap")
+        nt.links.new(nmap.inputs["Color"], _img(nrm, True).outputs["Color"])
+        nt.links.new(bsdf.inputs["Normal"], nmap.outputs["Normal"])
+    if ram != "-":
+        # Packed mask: R=Roughness, G=AO, B=Metallic. Split and route R/B to the BSDF.
+        try:
+            sep = nt.nodes.new("ShaderNodeSeparateColor"); rout, bout = "Red", "Blue"
+        except Exception:
+            sep = nt.nodes.new("ShaderNodeSeparateRGB"); rout, bout = "R", "B"
+        nt.links.new(sep.inputs["Color" if "Color" in sep.inputs else "Image"],
+                     _img(ram, True).outputs["Color"])
+        if "Roughness" in bsdf.inputs:
+            nt.links.new(bsdf.inputs["Roughness"], sep.outputs[rout])
+        if "Metallic" in bsdf.inputs:
+            nt.links.new(bsdf.inputs["Metallic"], sep.outputs[bout])
+
 for o in bpy.context.scene.objects:
     if o.type == "MESH":
         o.data.materials.clear()
@@ -646,21 +673,32 @@ print("PAKRAT_SKIN", out)
 '''
 
 
-def apply_skin(env: "CookEnv", fbx: str, image: str, progress=None) -> str:
-    """Bake `image` onto the mesh's material via Blender and return the skinned FBX.
-    Best-effort: returns the original FBX unchanged on any failure (never fatal)."""
+def apply_maps(env: "CookEnv", fbx: str, bc: str | None = None,
+               n: str | None = None, ram: str | None = None, progress=None) -> str:
+    """Bake a material texture SET (Base Color / Normal / Packed-mask RAM) onto the
+    mesh via Blender and return the skinned FBX. Any slot may be None — the combo is
+    whatever the caller supplies. The caller fills omitted Normal/RAM with NEUTRAL
+    defaults so the baked material never carries a stale map. Best-effort: returns the
+    original FBX unchanged on any failure (never fatal)."""
+    if not (bc or n or ram):
+        return fbx
     if progress:
-        progress("Applying your skin to the model…", None)
+        progress("Applying your material textures to the model…", None)
     out = str(home() / "_convert" / (Path(fbx).stem + "_skin.fbx"))
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     script = home() / "_applyskin.py"
     script.write_text(_SKIN_SCRIPT, encoding="utf-8")
     try:
-        core._run([env.blender_exe, "--background", "--python", str(script),
-                   "--", fbx, out, image])
+        core._run([env.blender_exe, "--background", "--python", str(script), "--",
+                   fbx, out, bc or "-", n or "-", ram or "-"])
     except Exception:
         return fbx
     return out if os.path.isfile(out) else fbx
+
+
+def apply_skin(env: "CookEnv", fbx: str, image: str, progress=None) -> str:
+    """Back-compat single-image wrapper (base colour only) → apply_maps."""
+    return apply_maps(env, fbx, bc=image, progress=progress)
 
 
 # ---------------------------------------------------------------------------

@@ -326,7 +326,8 @@ def list_assets(source_pak: str) -> dict:
     prov = _provider()
     from CUE4Parse.UE4.Assets.Exports.StaticMesh import UStaticMesh
     from CUE4Parse.UE4.Assets.Exports.Texture import UTexture2D
-    meshes, textures = [], []
+    snd = _sound_cls()
+    meshes, textures, sounds, other = [], [], [], []
     for kv in prov.Files:
         gf, k = kv.Value, kv.Key
         if not k.lower().endswith(".uasset"):
@@ -348,22 +349,78 @@ def list_assets(source_pak: str) -> dict:
             except Exception:  # noqa: BLE001  (index past the end throws)
                 break
             if isinstance(e, UStaticMesh):
-                kind = "mesh"
-                break
+                kind = "mesh"; break
             if isinstance(e, UTexture2D):
-                kind = "texture"
-                break
+                kind = "texture"; break
+            if snd is not None and isinstance(e, snd):
+                kind = "sound"; break
         if kind == "mesh":
             meshes.append(mount)
         elif kind == "texture":
             textures.append(mount)
-    return {"meshes": sorted(meshes), "textures": sorted(textures)}
+        elif kind == "sound":
+            sounds.append(mount)
+        else:
+            other.append(mount)          # any other cooked asset — extract raw sidecars
+    return {"meshes": sorted(meshes), "textures": sorted(textures),
+            "sounds": sorted(sounds), "other": sorted(other)}
+
+
+def _sound_cls():
+    """USoundWave type, or None if this CUE4Parse build lacks the Sound export."""
+    try:
+        from CUE4Parse.UE4.Assets.Exports.Sound import USoundWave
+        return USoundWave
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_SOUND_HINTS = ("sound", "audio", "sfx", "voice", "music", "foley", "ambient",
+                "/vo/", "_sw", "_cue", "dialog")
+
+
+def list_sounds(source_pak: "str | None" = None) -> list[str]:
+    """USoundWave mounts. If `source_pak` is given → just that mod pak (full scan, small).
+    Else the whole mounted set (base + mods), PATH-PREFILTERED to sound-ish folders so we
+    don't LoadPackage all 21k base files. Returns sorted mounts (no extension)."""
+    prov = _provider()
+    snd = _sound_cls()
+    if snd is None:
+        return []
+    out = []
+    for kv in prov.Files:
+        k = kv.Key
+        if not k.lower().endswith(".uasset"):
+            continue
+        if source_pak is not None:
+            try:
+                if kv.Value.Vfs.Name != source_pak:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+        elif not any(h in k.lower() for h in _SOUND_HINTS):
+            continue          # base+mods: cheap path prefilter before the load
+        mount = k[:-len(".uasset")]
+        try:
+            pkg = prov.LoadPackage(mount)
+        except Exception:  # noqa: BLE001
+            continue
+        for i in range(60):
+            try:
+                e = pkg.GetExport(i)
+            except Exception:  # noqa: BLE001
+                break
+            if isinstance(e, snd):
+                out.append(mount)
+                break
+    return sorted(set(out))
 
 
 def _classify_export(mount: str) -> "str | None":
-    """'mesh' | 'texture' | None for the package at `mount`, by export type."""
+    """'mesh' | 'texture' | 'sound' | None for the package at `mount`, by export type."""
     from CUE4Parse.UE4.Assets.Exports.StaticMesh import UStaticMesh
     from CUE4Parse.UE4.Assets.Exports.Texture import UTexture2D
+    snd = _sound_cls()
     try:
         pkg = _provider().LoadPackage(mount)
     except Exception:  # noqa: BLE001
@@ -377,6 +434,8 @@ def _classify_export(mount: str) -> "str | None":
             return "mesh"
         if isinstance(e, UTexture2D):
             return "texture"
+        if snd is not None and isinstance(e, snd):
+            return "sound"
     return None
 
 

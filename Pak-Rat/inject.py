@@ -52,14 +52,15 @@ MOD_NAME = "PakRatInjector"
 # as Decoration — `Return Catalogue <category> product class` on UI_Catalogue_Widget,
 # which the generated Lua already generalizes over. The cook yields a Decoration-
 # derived BP; `category` just routes which catalogue tab it's appended to.
-# Snacks/Drinks/Toys have NO hookable function (their product list is a static data
-# array on a stock-box CDO — ToysBox/DrinkBox/ConcessionsShelf), so they stay gated.
+# Snacks/Drinks/Toys ARE catalogue items via the 2-TIER vending-box path: the BOX is
+# the SKU, and its CDO holds a product-class array we repoint to a cloned product (see
+# the Container EXEMPLARS below + _clone_container_box). All three box name-maps were
+# verified against the R: base pak 2026-07-07, so the clone/box_repoint rename strings
+# are confirmed correct — the category is now live.
 CONTENT_TYPES = [
-    {"key": "Decoration", "category": "Decoration",  "mapped": True},
-    {"key": "Equipment",  "category": "Equipmement", "mapped": True},
-    {"key": "Snacks",     "category": None,          "mapped": False},
-    {"key": "Drinks",     "category": None,          "mapped": False},
-    {"key": "Toys",       "category": None,          "mapped": False},
+    {"key": "Decoration",             "category": "Decoration",  "mapped": True},
+    {"key": "Equipment",              "category": "Equipmement", "mapped": True},
+    {"key": "Snacks, Drinks & Toys",  "category": "Container",   "mapped": True},
 ]
 
 
@@ -781,8 +782,9 @@ def _clone_container_box(ex: dict, item: str, product_self: str, stage: Path) ->
     Assumes ex['box'] = {pak_dir, asset, self_path, class_token, product_class}. The
     box's name map holds the product class token AND the product's package path as
     imports; renaming both repoints the box's product import, then box_repoint fills
-    all slots. (Best-effort scaffold — verify the two rename strings match the box's
-    name map for drink/toy before shipping.)"""
+    all slots. (Rename strings VERIFIED present in the snack/toy/drink box name maps
+    against the R: base pak 2026-07-07 — SnackBox_Snack_C / ToysBox_C / DrinkBox_C and
+    each product class + package path all resolve.)"""
     box = ex["box"]
     box_item = item + "Box"
     box_base = box["self_path"].rsplit("/", 1)[0]              # .../Snack
@@ -812,7 +814,7 @@ def _clone_container_box(ex: dict, item: str, product_self: str, stage: Path) ->
 
 def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
                     stage: Path, progress=None, placement: str | None = None,
-                    skin: str | None = None) -> int:
+                    maps: "dict | None" = None) -> int:
     """Import+cook the user FBX to /Game/.../meshes/<mesh_token> and stage it.
     Returns files staged (0 => cook produced nothing)."""
     log = cook.home() / "inject_cook.log"
@@ -827,10 +829,12 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
     # against the wall (not half-buried) and its collision no longer penetrates.
     if placement == "wall":
         fbx = cook.wall_recenter(env, fbx, progress=progress)
-    # A separate user skin image → bake it onto the mesh material before the UE import
-    # (finishes the previously-deferred per-item skin for cooked adds).
-    if skin:
-        fbx = cook.apply_skin(env, fbx, skin, progress=progress)
+    # A user material texture-set (base colour / normal / packed-mask) → bake it onto
+    # the mesh material before the UE import. Omitted Normal/RAM were neutral-filled
+    # upstream (_resolve_maps) so the baked material carries no stale map.
+    if maps and (maps.get("bc") or maps.get("n") or maps.get("ram")):
+        fbx = cook.apply_maps(env, fbx, bc=maps.get("bc"), n=maps.get("n"),
+                              ram=maps.get("ram"), progress=progress)
     script = cook.project_dir() / "pakrat_mesh_import.py"
     script.write_text(_MESH_COOK_SCRIPT % {
         "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token,
@@ -858,9 +862,118 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
     return n
 
 
+# ---------------------------------------------------------------------------
+# Sound replace (D1) — swap ANY game USoundWave (arcade/pinball SFX, UI, music) for
+# the user's audio by importing+cooking it IN AT the vanilla sound's own path, so the
+# staged pak OVERRIDES it (the texture-override mechanism, for audio). Needs UE (cook)
+# — Ares can't run it; testers do. Best-effort / non-fatal at the call site.
+# ---------------------------------------------------------------------------
+_SOUND_COOK_SCRIPT = r'''
+import unreal, traceback
+LOG = r"%(log)s"
+def note(m):
+    try: open(LOG, "a").write(str(m) + "\n")
+    except Exception: pass
+SND = r"%(audio)s"; PKG = "%(pkg)s"; NM = "%(name)s"
+try:
+    at = unreal.AssetToolsHelpers.get_asset_tools()
+    task = unreal.AssetImportTask()
+    task.filename = SND; task.destination_path = PKG; task.destination_name = NM
+    task.replace_existing = True; task.automated = True; task.save = True
+    at.import_asset_tasks([task])
+    note("imported " + PKG + "/" + NM)
+except Exception:
+    note(traceback.format_exc())
+'''
+
+
+def _cook_user_sound(env: "cook.CookEnv", audio: str, target_game_path: str,
+                     stage: Path, progress=None) -> int:
+    """Import + cook `audio` to the SoundWave at `target_game_path` (/Game/...) and
+    stage it there, so the pak overrides that vanilla sound. Returns files staged."""
+    pkg, name = target_game_path.rsplit("/", 1)
+    log = cook.home() / "inject_sound.log"
+    try:
+        log.unlink()
+    except Exception:
+        pass
+    script = cook.project_dir() / "pakrat_sound_import.py"
+    script.write_text(_SOUND_COOK_SCRIPT % {"log": str(log), "audio": audio,
+                                            "pkg": pkg, "name": name}, encoding="utf-8")
+    if progress:
+        progress(f"Importing sound '{name}'…", None)
+    cook._ue(env, f"-ExecutePythonScript={script}")
+    if progress:
+        progress("Cooking sound…", None)
+    cook._ue(env, "-run=cook", "-targetplatform=Windows", "-unversioned",
+             "-cookall", "-nozenstore")
+    cooked_root = cook.project_dir() / "Saved" / "Cooked"
+    matches = sorted(cooked_root.rglob(name + ".uasset")) if cooked_root.is_dir() else []
+    if not matches:
+        return 0
+    src = matches[0]
+    mount = "RetroRewind/Content/" + pkg[len("/Game/"):]
+    dest = stage / Path(*mount.split("/"))
+    dest.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in src.parent.glob(name + ".*"):
+        if f.suffix in (".uasset", ".uexp", ".ubulk"):
+            shutil.copy2(f, dest / f.name); n += 1
+    return n
+
+
+def replace_sound(env: "cook.CookEnv", target_mount: str, user_audio: str,
+                  stage: Path, progress=None) -> int:
+    """Swap a game sound (any USoundWave — arcade/pinball SFX, UI, music) with the
+    user's audio, cooked in at the vanilla sound's own path (override). `target_mount`
+    accepts a 'RetroRewind/Content/…' mount or a '/Game/…' path."""
+    gp = target_mount
+    if gp.startswith("RetroRewind/Content/"):
+        gp = "/Game/" + gp[len("RetroRewind/Content/"):]
+    elif not gp.startswith("/Game/"):
+        gp = "/Game/" + gp.lstrip("/")
+    return _cook_user_sound(env, user_audio, gp, stage, progress=progress)
+
+
+def run_sound_pipeline(items: list[dict], progress=None) -> str:
+    """Replace one or more game sounds with the user's audio and pack them into ONE
+    override pak. items = [{'sound': <mount, no ext>, 'audio': <wav/ogg path>}, …].
+    Each sound is cooked in at its own path so the pak overrides it. Returns the pak
+    path. Needs UE (the cook) — Ares can't run it; testers do."""
+    import tempfile
+
+    def say(m, p=None):
+        if progress:
+            progress(m)
+
+    if not items:
+        raise RuntimeError("No sounds to replace.")
+    env = cook.setup(progress=progress)
+    work = Path(tempfile.mkdtemp(prefix="pakrat_snd_"))
+    stage = work / "stage"
+    stage.mkdir(parents=True, exist_ok=True)
+    n = len(items)
+    staged = 0
+    for i, it in enumerate(items, 1):
+        leaf = it["sound"].rstrip("/").split("/")[-1]
+        say(f"Replacing sound {leaf}  ({i}/{n})…")
+        staged += replace_sound(env, it["sound"], it["audio"], stage, progress=progress)
+    if staged == 0:
+        raise RuntimeError("The UE cook produced no sound — see inject_sound.log in the "
+                           "Pak Rat home folder.")
+    say("Packaging .pak…")
+    first = items[0]["sound"].rstrip("/").split("/")[-1]
+    name = first if n == 1 else f"{first}_plus{n - 1}"
+    out_pak = work / f"zzz_PakRat_{name}_snd_P.pak"
+    core._repak("pack", "--version", core.PAK_VERSION, "--mount-point", core.PAK_MOUNT,
+                "--path-hash-seed", core.PAK_SEED, str(stage), str(out_pak))
+    say("Done.")
+    return str(out_pak)
+
+
 def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
                      category: str, index: int, stage: Path,
-                     price: float | None = None, texture: str | None = None,
+                     price: float | None = None, maps: "dict | None" = None,
                      thumbnail: str | None = None, progress=None,
                      exemplar: str | None = None, screen: str | None = None) -> dict:
     """Cook the user's mesh + clone the type's exemplar to point at it, then stamp
@@ -871,11 +984,15 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     ex = get_exemplar(exemplar, category)
     item, mesh = _slot_tokens(ex, index)
     keep_mesh = bool(ex.get("keep_mesh"))
+    # Resolve the user's texture SET into {bc,n,ram}; omitted Normal/RAM are neutral-
+    # filled (D3) so a replace never keeps a stale map. `bc` is the base-colour skin.
+    mset = _resolve_maps(maps, stage)
+    bc = mset.get("bc")
     # Equipment (keep_mesh) clones the base machine WHOLE — vanilla mesh + materials,
     # no user model — so there is no FBX to cook. Everything else cooks the user mesh.
     if not keep_mesh and _cook_user_mesh(
             env, fbx, mesh, stage, progress=progress,
-            placement=ex.get("placement"), skin=texture) == 0:
+            placement=ex.get("placement"), maps=mset) == 0:
         raise RuntimeError(
             f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
             "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
@@ -895,20 +1012,20 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     else:
         # Equipment body/colour: additive per-item MI reskin where the colour MIs are
         # BP-reachable (arcade), else an in-place texture override (pinball).
-        if texture and ex.get("color_materials"):
+        if bc and ex.get("color_materials"):
             try:
                 if progress:
                     progress("Reskinning the machine's colour…", None)
-                mi_renames = _stage_equipment_textures(ex, item, texture, stage)
+                mi_renames = _stage_equipment_textures(ex, item, mset, stage)
             except Exception as e:
                 if progress:
                     progress(f"Colour reskin skipped ({e}); keeping the vanilla skin.", None)
                 mi_renames = []
-        elif texture and ex.get("body_override"):
+        elif bc and ex.get("body_override"):
             try:
                 if progress:
                     progress("Reskinning the machine's colour…", None)
-                _reskin_override(ex["body_override"], texture, stage)
+                _reskin_override(ex["body_override"], bc, stage)
             except Exception as e:
                 if progress:
                     progress(f"Colour reskin skipped ({e}); keeping the vanilla skin.", None)
@@ -1001,6 +1118,48 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
 # re-identitied to the item's own package path via relink.clone and staged.
 # (UE/game-box paths — validated in Tron's in-game acceptance test.)
 # ---------------------------------------------------------------------------
+def _neutral_png(kind: str, size: "tuple[int, int]", dest: Path) -> Path:
+    """Write a NEUTRAL default map PNG so a replaced material never keeps a stale map
+    (D3). 'normal' -> flat normal RGB(128,128,255); 'ram' -> packed mask
+    R=roughness(160) / G=AO white(255) / B=metallic(0)."""
+    from PIL import Image
+    color = (128, 128, 255) if kind == "normal" else (160, 255, 0)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (int(size[0]), int(size[1])), color).save(dest)
+    return dest
+
+
+def _resolve_maps(maps: "dict | str | None", stage: Path) -> "dict":
+    """Normalise the caller's texture-set into {'bc','n','ram'} of file paths and
+    enforce D3: if a Base Color (a real skin replace) is given, any omitted Normal /
+    Packed-mask slot is filled with a generated NEUTRAL default so the material never
+    inherits a stale map. Accepts a legacy single-path str (treated as base colour)."""
+    if maps is None:
+        return {"bc": None, "n": None, "ram": None}
+    if isinstance(maps, str):
+        maps = {"bc": maps}
+    out = {"bc": maps.get("bc"), "n": maps.get("n"), "ram": maps.get("ram")}
+    # Size the neutrals to the base-colour image when we have one, else a safe 1024².
+    size = (1024, 1024)
+    if out["bc"]:
+        try:
+            from PIL import Image
+            with Image.open(out["bc"]) as im:
+                size = im.size
+        except Exception:
+            pass
+    if out["bc"] or out["n"] or out["ram"]:
+        # Neutrals are SOURCE images for the bake/inject — write them to a temp dir,
+        # never under `stage` (that would pack the raw PNG into the mod).
+        import tempfile
+        nd = Path(tempfile.mkdtemp(prefix="pakrat_neutral_"))
+        if not out["n"]:
+            out["n"] = str(_neutral_png("normal", size, nd / "neutral_n.png"))
+        if not out["ram"]:
+            out["ram"] = str(_neutral_png("ram", size, nd / "neutral_ram.png"))
+    return out
+
+
 def _reskin_and_stage(base_mount: str, user_image: str, new_game_path: str,
                       old_leaf: str, new_leaf: str, stage: Path) -> None:
     """Extract `base_mount` from the game, inject `user_image` (the injector WRITES
@@ -1050,7 +1209,7 @@ def _extract_game_asset(game_path: str, dest: Path) -> Path:
     return dest / Path(*pak_dir.split("/")) / f"{leaf}.uasset"
 
 
-def _stage_equipment_textures(ex: dict, item: str, user_body_image: str,
+def _stage_equipment_textures(ex: dict, item: str, mset: "dict",
                               stage: Path) -> list[str]:
     """Recolour ONE equipment machine additively (the Arcade_D recipe): reskin the
     body base-colour texture from the user's image, then clone the colour MIs to new
@@ -1067,7 +1226,7 @@ def _stage_equipment_textures(ex: dict, item: str, user_body_image: str,
     new_body_game = f"{game_dir}/{new_body_leaf}"
     _reskin_and_stage(
         base_mount=body["path"].replace("/Game/", "RetroRewind/Content/", 1),
-        user_image=user_body_image, new_game_path=new_body_game,
+        user_image=mset["bc"], new_game_path=new_body_game,
         old_leaf=body["name"], new_leaf=new_body_leaf, stage=stage)
 
     # 2) clone each colour MI to a fresh identity under the item dir; the body MI
@@ -1152,7 +1311,7 @@ def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> d
         entry = build_added_item(
             env, it["fbx"], it.get("name") or f"PakRatItem{i}",
             it.get("category", "Decoration"), base_index + i, stage,
-            price=it.get("price"), texture=it.get("texture"),
+            price=it.get("price"), maps=it.get("maps"),
             thumbnail=it.get("thumbnail"), progress=progress,
             exemplar=it.get("exemplar"), screen=it.get("screen"))
         built.append(entry)

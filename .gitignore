@@ -40,6 +40,12 @@ Pak-Rat/data/meshes_clean.txt
 _build.log
 
 # ── Internal docs & stray branding — kept local, out of the public package ─
+# PROJECT_MEMORY.md = the singular internal dev-memory (agent continuity). Any
+# *_HANDOFF.md / *_BACKLOG.md are internal scratch — NEVER ship them (two handoff
+# docs leaked into the public repo before this pattern existed).
+/PROJECT_MEMORY.md
+*_HANDOFF.md
+*_BACKLOG.md
 /V2_BACKLOG.md
 /Pak-Rat/DESIGN_NOTES.md
 /pak-rat_transparent.png

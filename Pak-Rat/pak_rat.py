@@ -29,8 +29,8 @@ from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QPainter, QPalette,
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QDialog,
     QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QMenu, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea,
-    QSplashScreen, QToolButton, QToolTip, QTreeWidget, QTreeWidgetItem,
+    QListWidget, QMenu, QMessageBox, QProgressBar, QPushButton, QRadioButton,
+    QScrollArea, QSplashScreen, QToolButton, QToolTip, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QWizard, QWizardPage,
 )
 
@@ -44,7 +44,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY, \
-    PAGE_ADDEXEMPLAR, PAGE_EXTRACTSRC = range(19)
+    PAGE_ADDEXEMPLAR, PAGE_EXTRACTSRC, PAGE_SOUND = range(20)
 
 APP_VERSION = core.APP_VERSION   # single source of truth lives in core.py
 
@@ -465,6 +465,7 @@ class ModePage(QWizardPage):
         self.rb_add = QRadioButton("Add Asset  (inject brand-new content)")
         self.rb_extract = QRadioButton("Extract Asset")
         self.rb_combine = QRadioButton("Combine Mods")
+        self.rb_sound = QRadioButton("Replace Sound  (swap a game sound for your audio)")
         self.rb_regular.setChecked(True)
 
         self.group = QButtonGroup(self)
@@ -473,6 +474,7 @@ class ModePage(QWizardPage):
         self.group.addButton(self.rb_extract, 2)
         self.group.addButton(self.rb_cook, 3)
         self.group.addButton(self.rb_combine, 4)
+        self.group.addButton(self.rb_sound, 5)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.rb_extract)
@@ -509,6 +511,13 @@ class ModePage(QWizardPage):
         lab4.setStyleSheet("color:#888;")
         lab4.setWordWrap(True)
         lay.addWidget(lab4)
+        lay.addSpacing(12)
+        lay.addWidget(self.rb_sound)
+        self.sound_lab = QLabel("    Replace any game sound (arcade / pinball SFX, UI, "
+                                "music) with your own audio — cooked in over the original.")
+        self.sound_lab.setStyleSheet("color:#888;")
+        self.sound_lab.setWordWrap(True)
+        lay.addWidget(self.sound_lab)
         lay.addStretch(1)
 
         # Shown only when no Unreal Engine is installed (cooker hidden then).
@@ -556,6 +565,11 @@ class ModePage(QWizardPage):
                             else "Add Asset  (inject brand-new content)")
         if not avail and self.rb_add.isChecked():
             self.rb_regular.setChecked(True)
+        # Sound replace cooks the user's audio with Unreal, so it needs UE too.
+        self.rb_sound.setVisible(avail)
+        self.sound_lab.setVisible(avail)
+        if not avail and self.rb_sound.isChecked():
+            self.rb_regular.setChecked(True)
         self.group.idToggled.connect(self._on_toggle)
 
     def _on_toggle(self, _id, checked):
@@ -567,6 +581,8 @@ class ModePage(QWizardPage):
             self.wizard().mode = "extract"
         elif self.rb_combine.isChecked():
             self.wizard().mode = "combine"
+        elif self.rb_sound.isChecked():
+            self.wizard().mode = "sound"
         else:
             self.wizard().mode = "regular"
 
@@ -582,6 +598,9 @@ class ModePage(QWizardPage):
         # Extract first asks WHERE to pull from (base game vs a ~mods pak).
         if mode == "extract":
             return PAGE_EXTRACTSRC
+        # Sound replace: pick a game sound + your audio (its own self-contained page).
+        if mode == "sound":
+            return PAGE_SOUND
         return PAGE_ASSET
 
 
@@ -725,7 +744,10 @@ def extract_source_items(wiz) -> list:
     if src:
         import extract_mesh
         a = extract_mesh.list_assets(src)
-        return sorted(set(a["meshes"]) | set(a["textures"]))
+        # Universal: meshes + textures + sounds + any other cooked asset (all export
+        # via export_any — sounds/other come out as raw cooked sidecars).
+        return sorted(set(a["meshes"]) | set(a["textures"])
+                      | set(a.get("sounds", [])) | set(a.get("other", [])))
     return sorted(set(core.load_meshes()) | set(core.load_assets()))
 
 
@@ -1219,8 +1241,7 @@ class AddCategoryPage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle("What are you adding?")
-        self.setSubTitle("Pick the kind of item. Greyed-out types aren't mapped "
-                         "yet — they're coming in future updates.")
+        self.setSubTitle("Pick the kind of item you're adding.")
         self.group = QButtonGroup(self)
         lay = QVBoxLayout(self)
         self._radios = []
@@ -1237,9 +1258,9 @@ class AddCategoryPage(QWizardPage):
         if first_mapped:
             first_mapped.setChecked(True)
         lay.addStretch(1)
-        note = QLabel("Snacks, Drinks and Toys aren't catalogue items — they're "
-                      "stocked from machines/boxes, a different system that's still "
-                      "being mapped. They'll unlock in a future update.")
+        note = QLabel("Snacks, Drinks & Toys are added as vending boxes stocked with "
+                      "your custom product — you'll pick the specific box (snack / "
+                      "drink / toy) on the next step.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;")
         lay.addWidget(note)
@@ -1338,7 +1359,9 @@ class AddInputPage(QWizardPage):
         self._fbx = None
         self._queue = []            # items queued via "＋ add another" (multi-add)
 
-        self._texture = None
+        self._texture = None      # base colour (_bc)
+        self._normal = None       # normal map (_n)
+        self._ram = None          # packed mask (_ram)
         self._thumbnail = None
         self._screen = None
 
@@ -1350,10 +1373,23 @@ class AddInputPage(QWizardPage):
         self.price_edit = QLineEdit()
         self.price_edit.setPlaceholderText("Price (whole number, e.g. 100)")
 
-        self.tex_btn = QPushButton("Choose a texture (model skin)…")
-        self.tex_lbl = QLabel("Optional — paints this image onto your model as its "
-                              "skin. Blank keeps the model's own textures.")
+        self.tex_btn = QPushButton("Choose a Base Color texture…")
+        self.tex_lbl = QLabel("Optional — the main visible colour (_bc, sRGB). Blank "
+                              "keeps the model's own textures.")
         self.tex_lbl.setStyleSheet("color:#888;")
+        self.tex_lbl.setWordWrap(True)
+        # Material texture SET — the combo is auto-detected from whichever of these the
+        # user fills. Omitted Normal/Packed-mask are replaced with NEUTRAL defaults (D3).
+        self.normal_btn = QPushButton("Choose a Normal map…")
+        self.normal_lbl = QLabel("Optional — surface detail (_n). Blank → flat neutral "
+                                 "normal (never the old map).")
+        self.normal_lbl.setStyleSheet("color:#888;")
+        self.normal_lbl.setWordWrap(True)
+        self.ram_btn = QPushButton("Choose a Packed Mask (RAM)…")
+        self.ram_lbl = QLabel("Optional — R=Roughness, G=AO, B=Metallic (_ram). Blank → "
+                              "neutral mask (never the old map).")
+        self.ram_lbl.setStyleSheet("color:#888;")
+        self.ram_lbl.setWordWrap(True)
         # Second (optional) equipment texture: the machine's screen / display.
         self.screen_btn = QPushButton("Choose a screen / display texture…")
         self.screen_lbl = QLabel("Optional — replaces the machine's video-screen texture.")
@@ -1424,6 +1460,8 @@ class AddInputPage(QWizardPage):
         lay.addSpacing(6)
 
         lay.addLayout(_row((self.tex_btn, 0), (self.tex_lbl, 1)))
+        lay.addLayout(_row((self.normal_btn, 0), (self.normal_lbl, 1)))
+        lay.addLayout(_row((self.ram_btn, 0), (self.ram_lbl, 1)))
         lay.addLayout(_row((self.screen_btn, 0), (self.screen_lbl, 1)))
         lay.addLayout(_row((self.thumb_btn, 0), (self.thumb_lbl, 1)))
         lay.addSpacing(6)
@@ -1436,6 +1474,8 @@ class AddInputPage(QWizardPage):
 
         self.pick_btn.clicked.connect(self._pick)
         self.tex_btn.clicked.connect(self._pick_texture)
+        self.normal_btn.clicked.connect(self._pick_normal)
+        self.ram_btn.clicked.connect(self._pick_ram)
         self.thumb_btn.clicked.connect(self._pick_thumbnail)
         self.queue_btn.clicked.connect(self._queue_current)
         self.name_edit.textChanged.connect(lambda _: self.completeChanged.emit())
@@ -1498,6 +1538,12 @@ class AddInputPage(QWizardPage):
         self.tex_lbl.setStyleSheet("color:#888;")
         self.tex_btn.setVisible(True)
         self.tex_lbl.setVisible(True)
+        # Normal + Packed-mask pickers bake into a cooked user mesh's material. keep_mesh
+        # equipment recolours through its MI (base colour only), so hide them there.
+        self.normal_btn.setVisible(not km)
+        self.normal_lbl.setVisible(not km)
+        self.ram_btn.setVisible(not km)
+        self.ram_lbl.setVisible(not km)
         # Screen/display picker: only for equipment bases that have a screen texture.
         has_screen = bool(km and ex.get("screen_texture"))
         self.screen_btn.setVisible(has_screen)
@@ -1534,10 +1580,24 @@ class AddInputPage(QWizardPage):
 
     def _pick_texture(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose a texture (model skin)", "", _image_filter())
+            self, "Choose a Base Color texture", "", _image_filter())
         if path:
             self._texture = path
             self.tex_lbl.setText(_basename(path))
+
+    def _pick_normal(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a Normal map", "", _image_filter())
+        if path:
+            self._normal = path
+            self.normal_lbl.setText(_basename(path))
+
+    def _pick_ram(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a Packed Mask (RAM) texture", "", _image_filter())
+        if path:
+            self._ram = path
+            self.ram_lbl.setText(_basename(path))
 
     def _pick_thumbnail(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1569,7 +1629,9 @@ class AddInputPage(QWizardPage):
             "category": getattr(self.wizard(), "add_category", "Decoration"),
             "exemplar": self.base_combo.currentData(),   # per-item floor/wall base
             "price": self._price(),
-            "texture": self._texture,
+            # Material texture SET — combo is auto-detected from whichever slots the
+            # user filled; omitted Normal/RAM get neutral defaults downstream (D3).
+            "maps": {"bc": self._texture, "n": self._normal, "ram": self._ram},
             "screen": self._screen,                      # equipment screen/display tex
             "thumbnail": self._thumbnail,
         }
@@ -1577,12 +1639,16 @@ class AddInputPage(QWizardPage):
     def _clear_form(self):
         self._fbx = None
         self._texture = None
+        self._normal = None
+        self._ram = None
         self._thumbnail = None
         self._screen = None
         self.pick_lbl.setText("No model selected.")
         self.name_edit.clear()
         self.price_edit.clear()
-        self.tex_lbl.setText("Optional — paints this image onto your model as its skin.")
+        self.tex_lbl.setText("Optional — the main visible colour (_bc).")
+        self.normal_lbl.setText("Optional — surface detail (_n); blank → neutral.")
+        self.ram_lbl.setText("Optional — R=Rough, G=AO, B=Metallic (_ram); blank → neutral.")
         self.screen_lbl.setText("Optional — replaces the machine's video-screen texture.")
         self.thumb_lbl.setText("Optional — reuses the base item's icon if left blank.")
 
@@ -2153,6 +2219,141 @@ class CookTexturePage(QWizardPage):
 # ---------------------------------------------------------------------------
 # Process page — spinner while the pipeline runs
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Replace Sound (D1) — pick a game USoundWave + your audio; the pipeline cooks your
+# audio in over the original. Self-contained page (source picker + threaded sound list
+# + audio picker + queue). Needs UE (the cook) — gated on cook_available in ModePage.
+# ---------------------------------------------------------------------------
+class _SoundLoader(QThread):
+    loaded = Signal(list)
+
+    def __init__(self, src):
+        super().__init__()
+        self.src = src
+
+    def run(self):
+        try:
+            import extract_mesh
+            self.loaded.emit(extract_mesh.list_sounds(self.src))
+        except Exception:  # noqa: BLE001
+            self.loaded.emit([])
+
+
+class SoundReplacePage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Replace a sound")
+        self.setSubTitle("Swap a game sound (arcade / pinball SFX, UI, music, …) for your "
+                         "own audio. Queue several, then Next cooks + packs them.")
+        self._audio = None
+        self._queue = []          # [{'sound': mount, 'audio': path}]
+        self._all = []
+        self._loader = None
+
+        self.src_combo = QComboBox()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Filter sounds…")
+        self.listw = QListWidget()
+        self.audio_btn = QPushButton("Choose your audio (WAV)…")
+        self.audio_lbl = QLabel("No audio chosen.")
+        self.audio_lbl.setStyleSheet("color:#888;")
+        self.queue_btn = QPushButton("＋ Queue this swap")
+        self.queue_lbl = QLabel("0 queued.")
+        self.queue_lbl.setStyleSheet("color:#888;")
+        self.status = QLabel("")
+        self.status.setStyleSheet("color:#888;")
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Source"))
+        lay.addWidget(self.src_combo)
+        lay.addWidget(self.search)
+        lay.addWidget(self.listw, 1)
+        lay.addLayout(_row((self.audio_btn, 0), (self.audio_lbl, 1)))
+        lay.addLayout(_row((self.queue_btn, 0), (self.queue_lbl, 1)))
+        lay.addWidget(self.status)
+
+        self.audio_btn.clicked.connect(self._pick_audio)
+        self.queue_btn.clicked.connect(self._queue_current)
+        self.search.textChanged.connect(lambda _: self._refilter())
+        self.src_combo.currentIndexChanged.connect(lambda _: self._load())
+        self.listw.itemSelectionChanged.connect(lambda: self.completeChanged.emit())
+
+    def initializePage(self):
+        self._queue = []
+        self._audio = None
+        self.audio_lbl.setText("No audio chosen.")
+        self.queue_lbl.setText("0 queued.")
+        self.src_combo.blockSignals(True)
+        self.src_combo.clear()
+        self.src_combo.addItem("Base game", None)
+        try:
+            for p in core.list_mod_paks():
+                self.src_combo.addItem("Mod: " + _basename(p), p)
+        except Exception:  # noqa: BLE001
+            pass
+        self.src_combo.blockSignals(False)
+        self._all = []
+        self._load()
+
+    def _load(self):
+        self.listw.clear()
+        self.status.setText("Loading sounds…  (the first base-game scan can take a moment)")
+        self._loader = _SoundLoader(self.src_combo.currentData())
+        self._loader.loaded.connect(self._on_loaded)
+        self._loader.start()
+
+    def _on_loaded(self, sounds):
+        self._all = list(sounds)
+        self.status.setText(f"{len(self._all)} sounds found.")
+        self._refilter()
+
+    def _refilter(self):
+        q = self.search.text().strip().lower()
+        self.listw.clear()
+        for m in self._all:
+            if not q or q in m.lower():
+                self.listw.addItem(m)
+
+    def _pick_audio(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose your audio", "", "Audio (*.wav *.ogg *.flac);;All files (*)")
+        if path:
+            self._audio = path
+            self.audio_lbl.setText(_basename(path))
+
+    def _selected_sound(self):
+        it = self.listw.currentItem()
+        return it.text() if it else None
+
+    def _queue_current(self):
+        snd = self._selected_sound()
+        if not snd or not self._audio:
+            QMessageBox.information(self, "Pak Rat",
+                                    "Select a sound and choose your audio first.")
+            return
+        self._queue.append({"sound": snd, "audio": self._audio})
+        self.queue_lbl.setText(f"{len(self._queue)} queued.")
+        self._audio = None
+        self.audio_lbl.setText("No audio chosen.")
+        self.completeChanged.emit()
+
+    def isComplete(self):
+        return bool(self._queue) or bool(self._selected_sound() and self._audio)
+
+    def validatePage(self):
+        items = list(self._queue)
+        snd = self._selected_sound()
+        if snd and self._audio and not any(q["sound"] == snd for q in items):
+            items.append({"sound": snd, "audio": self._audio})
+        if not items:
+            return False
+        self.wizard().sound_items = items
+        return True
+
+    def nextId(self):
+        return PAGE_PROCESS
+
+
 class PipelineWorker(QThread):
     status = Signal(str)
     done = Signal(str)
@@ -2160,7 +2361,8 @@ class PipelineWorker(QThread):
 
     def __init__(self, mode, mesh_plan, mesh_user_files,
                  cook_items=None, tex_items=None, combine_selected=None,
-                 cook_tex_items=None, add_items=None, add_reset=False):
+                 cook_tex_items=None, add_items=None, add_reset=False,
+                 sound_items=None):
         super().__init__()
         self.mode = mode
         self.mesh_plan = mesh_plan
@@ -2171,6 +2373,7 @@ class PipelineWorker(QThread):
         self.cook_tex_items = cook_tex_items or {}
         self.add_items = add_items or []
         self.add_reset = add_reset
+        self.sound_items = sound_items or []
         self.add_meta = None   # {mod, ini} for add mode — bundled on deploy/finish
 
     def run(self):
@@ -2195,6 +2398,10 @@ class PipelineWorker(QThread):
             elif self.mode == "combine":
                 pak = core.combine_paks(self.combine_selected,
                                         progress=self.status.emit)
+            elif self.mode == "sound":
+                pak = inject.run_sound_pipeline(
+                    self.sound_items,
+                    progress=lambda m, p=None: self.status.emit(m))
             else:  # regular texture mode — one or many textures into one pak
                 items = [{"texture": tex, "image": img}
                          for tex, img in self.tex_items.items()]
@@ -2248,7 +2455,8 @@ class ProcessPage(QWizardPage):
             getattr(w, "tex_items", {}), getattr(w, "combine_selected", []),
             getattr(w, "cook_tex_items", {}),
             add_items=getattr(w, "add_items", []),
-            add_reset=getattr(w, "add_reset", False))
+            add_reset=getattr(w, "add_reset", False),
+            sound_items=getattr(w, "sound_items", []))
         self.worker.status.connect(self.status.setText)
         self.worker.done.connect(self.on_done)
         self.worker.failed.connect(self._on_fail)
@@ -2877,6 +3085,78 @@ class CombineSelectPage(QWizardPage):
 # ---------------------------------------------------------------------------
 # Wizard
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Help / info key — the "what can Pak Rat do?" reference, opened by the wizard's
+# Help button from any page. Covers every mode, the Add-Asset categories, the
+# material texture set + neutral defaults, extraction, and sound replace.
+# ---------------------------------------------------------------------------
+HELP_TEXT = """
+<h2>Pak Rat — what can it do?</h2>
+
+<b>Modes (page 1)</b>
+<ul>
+<li><b>Regular Texture</b> — swap one texture on an existing asset with your image.</li>
+<li><b>Cook Mesh</b> — bring your own 3D model (FBX/OBJ/glTF/…); Pak Rat cooks it with
+    Unreal into a drop-in asset. <i>Needs Unreal Engine 5.4.4.</i></li>
+<li><b>Add Asset</b> — inject a brand-new catalogue item built from your model — a true
+    addition, not a swap. <i>Needs UE 5.4.4.</i></li>
+<li><b>Extract Asset</b> — pull originals out of the game (or a mod) to edit. Handles
+    <b>Meshes, Textures, Sounds</b> and any Other cooked asset.</li>
+<li><b>Combine Mods</b> — cherry-pick assets from mods you already have into one pak.</li>
+<li><b>Replace Sound</b> — swap any game sound (arcade / pinball SFX, UI, music) with your
+    own audio, cooked in over the original. <i>Needs UE 5.4.4.</i></li>
+</ul>
+
+<b>Add Asset — item types</b>
+<ul>
+<li><b>Decoration</b> — floor items (couch) and wall-mounted items (movie poster).</li>
+<li><b>Equipment</b> — Arcade &amp; Pinball machines (recoloured; keep the vanilla mesh).</li>
+<li><b>Snacks, Drinks &amp; Toys</b> — added as vending boxes stocked with your custom
+    product; pick snack / drink / toy on the next step.</li>
+</ul>
+
+<b>Material texture set (your model's skin)</b><br>
+Every slot is optional — Pak Rat uses whatever you supply (the combo is auto-detected):
+<ul>
+<li><b>Base Color</b> (<code>_bc</code>, sRGB) — the main visible colour.</li>
+<li><b>Normal</b> (<code>_n</code>) — surface detail / fake depth.</li>
+<li><b>Packed Mask</b> (<code>_ram</code>) — R=Roughness, G=Ambient Occlusion, B=Metallic.</li>
+</ul>
+If you leave Normal or Packed Mask blank, Pak Rat fills it with a <b>neutral default</b>
+(flat normal / neutral mask) — it never keeps the original asset's old map, so a replaced
+model can't inherit stale surface detail.
+
+<b>Extract &amp; replace</b><br>
+Extraction is universal — Meshes (as .uasset / geometry), Textures (PNG/DDS), Sounds and any
+other cooked asset come out as files you can edit and re-pack. Sounds throughout the game are
+swappable via <b>Replace Sound</b>.
+
+<b>Tip</b> — the Help button is on every page. Modes that cook (Cook / Add / Replace Sound)
+appear only when Unreal Engine 5.4.4 is installed.
+"""
+
+
+def _show_help_dialog(parent):
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Pak Rat — Help")
+    dlg.resize(600, 460)
+    lay = QVBoxLayout(dlg)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    body = QLabel(HELP_TEXT)
+    body.setWordWrap(True)
+    body.setTextFormat(Qt.RichText)
+    body.setAlignment(Qt.AlignTop)
+    body.setContentsMargins(10, 10, 10, 10)
+    scroll.setWidget(body)
+    lay.addWidget(scroll)
+    bb = QDialogButtonBox(QDialogButtonBox.Close)
+    bb.rejected.connect(dlg.reject)
+    bb.accepted.connect(dlg.accept)
+    lay.addWidget(bb)
+    dlg.exec()
+
+
 class PakRatWizard(QWizard):
     def __init__(self):
         super().__init__()
@@ -2898,6 +3178,9 @@ class PakRatWizard(QWizard):
         self.setWindowIcon(QIcon(resource_path("Pak-Rat.ico")))
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
+        # Always-available Help button → the "what can this do?" reference.
+        self.setOption(QWizard.HaveHelpButton, True)
+        self.helpRequested.connect(lambda: _show_help_dialog(self))
         # Fixed size — long asset paths must never push the window off-screen.
         self.setFixedSize(640, 470)
 
@@ -2919,6 +3202,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_ADDCATEGORY, AddCategoryPage())
         self.setPage(PAGE_ADDINPUT, AddInputPage())
         self.setPage(PAGE_EXTRACTSRC, ExtractSourcePage())
+        self.setPage(PAGE_SOUND, SoundReplacePage())
         self.setStartId(PAGE_MODE)
 
         # On the final "Done" page, Back should start the whole flow over at
