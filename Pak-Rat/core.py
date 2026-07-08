@@ -25,7 +25,7 @@ from pathlib import Path
 # Single source of truth for the app version — pak_rat.py (APP_VERSION) and
 # inject.py (manifest 'version') both read this so the build can't label itself
 # an older beta again (#2: exe reported b6 while shipping b8).
-APP_VERSION = "3.0.0-beta28"
+APP_VERSION = "3.0.0-beta29"
 
 UE_VERSION = "5.4"           # RR is UE 5.4 (verified via injector 'check')
 PAK_VERSION = "V11"
@@ -279,6 +279,7 @@ def ensure_oodle() -> str:
 # there's nothing to bundle or let drift out of date.
 # ---------------------------------------------------------------------------
 MESHES_CLEAN = lambda: _data_dir() / "meshes_clean.txt"            # noqa: E731
+SOUNDS_CLEAN = lambda: _data_dir() / "sounds_clean.txt"            # noqa: E731
 
 _NO_GAME = ("(placeholder) couldn't read the game's assets — is Retro Rewind "
             "installed?")
@@ -286,23 +287,34 @@ _NO_GAME = ("(placeholder) couldn't read the game's assets — is Retro Rewind "
 
 _MESH_ROOT = "RetroRewind/Content/VideoStore/asset/meshes/"
 
+# Sound-ish path hints (name-based). The authoritative sound scan is CUE4Parse
+# (extract_mesh.list_sounds), but that LoadPackages every file; for the on-demand
+# clean list / universal classify we prefilter cheaply by path. Anything a hint
+# misses still surfaces under "other" in the universal set — the classifier
+# LABELS, it never blocks (per Yodah: accept everything, just classify).
+_SOUND_HINTS = ("sound", "audio", "sfx", "voice", "music", "foley", "ambient",
+                "/vo/", "_sw", "_cue", "dialog")
+
+
+def _is_sound_mount(mount: str) -> bool:
+    low = mount.lower()
+    return any(h in low for h in _SOUND_HINTS)
+
 
 def _generate_clean_lists() -> None:
-    """Scan the installed base pak and (re)write textures_clean.txt + meshes_clean.txt.
-    Texture rule (per Yodah): a swappable texture is T_<name>_bc — the base colour.
-    Any other T_ asset is an NPC/other map we deliberately leave alone.
-    Mesh rule (per Yodah): LA_/SM_ static meshes living under the game's mesh
-    folder (RetroRewind/Content/VideoStore/asset/meshes) — this excludes L10N
-    duplicates, NPC/character meshes, and effect-room props elsewhere."""
-    tex, mesh = [], []
+    """Scan the installed base pak and (re)write the per-type Inject picker lists:
+    textures_clean.txt (T_<name>_bc base colours), meshes_clean.txt (LA_/SM_ static
+    meshes under the mesh folder) and sounds_clean.txt (sound-ish packages). These
+    curate the Inject per-type pickers. The classifier LABELS by type — it never
+    blocks; the universal Extract set (classify_all) surfaces everything regardless."""
+    tex, mesh, snd = [], [], []
     for e in _pak_entries():
         if not e.endswith(".uasset"):
             continue
         m = e[:-7]
-        # Skip localization copies (RetroRewind/Content/L10N/<lang>/…). They are
-        # per-language duplicates of the SAME texture (#8: T_PricePoster_A_01_bc
-        # appeared 20× — 1 canonical + 17 L10N — flooding the swap picker). The
-        # mesh branch already dodges this via its _MESH_ROOT anchor.
+        # Skip localization copies (…/L10N/<lang>/…). They are per-language
+        # duplicates of the SAME asset (#8: T_PricePoster_A_01_bc appeared 20×)
+        # and flood the picker; classify_all collapses+labels them instead.
         if "/L10N/" in m:
             continue
         leaf = m.rsplit("/", 1)[-1]
@@ -310,22 +322,60 @@ def _generate_clean_lists() -> None:
             tex.append(m)
         elif m.startswith(_MESH_ROOT) and leaf.startswith(("LA_", "SM_")):
             mesh.append(m)
+        elif _is_sound_mount(m):
+            snd.append(m)
     d = _data_dir()
     d.mkdir(parents=True, exist_ok=True)
     TEXTURES_CLEAN().write_text("\n".join(sorted(set(tex))) + "\n", encoding="utf-8")
     MESHES_CLEAN().write_text("\n".join(sorted(set(mesh))) + "\n", encoding="utf-8")
+    SOUNDS_CLEAN().write_text("\n".join(sorted(set(snd))) + "\n", encoding="utf-8")
+
+
+def classify_all() -> dict:
+    """Classify EVERY base-pak package into buckets for the universal extractor —
+    nothing is filtered out (classify, don't block). Per-language L10N duplicates
+    collapse to ONE real, extractable copy per asset, surfaced under 'localization'
+    and labeled 'Localization copies' in the UI. Returns
+    {'mesh':[…], 'texture':[…], 'sound':[…], 'other':[…], 'localization':[…]}."""
+    buckets = {"mesh": set(), "texture": set(), "sound": set(), "other": set()}
+    l10n_seen: dict[str, str] = {}
+    for e in _pak_entries():
+        if not e.endswith(".uasset"):
+            continue
+        m = e[:-7]
+        if "/L10N/" in m:
+            # Collapse the 15-20 per-language copies to one canonical KEY, but
+            # keep a REAL (extractable) mount as the representative.
+            canon = re.sub(r"/L10N/[^/]+/", "/", m)
+            l10n_seen.setdefault(canon, m)
+            continue
+        leaf = m.rsplit("/", 1)[-1]
+        if leaf.startswith("T_"):
+            buckets["texture"].add(m)
+        elif leaf.startswith(("LA_", "SM_", "SK_", "SKM_")):
+            buckets["mesh"].add(m)
+        elif _is_sound_mount(m):
+            buckets["sound"].add(m)
+        else:
+            buckets["other"].add(m)
+    out = {k: sorted(v) for k, v in buckets.items()}
+    out["localization"] = sorted(l10n_seen.values())
+    return out
 
 
 def _ensure_clean_lists() -> bool:
-    """Make sure both dropdown lists exist, generating them from the installed
-    game if not. False if the game can't be read (not installed / repak fail)."""
-    if TEXTURES_CLEAN().exists() and MESHES_CLEAN().exists():
+    """Make sure the per-type picker lists exist, generating them from the
+    installed game if not. False if the game can't be read (not installed / repak
+    fail)."""
+    if (TEXTURES_CLEAN().exists() and MESHES_CLEAN().exists()
+            and SOUNDS_CLEAN().exists()):
         return True
     try:
         _generate_clean_lists()
     except Exception:
         return False
-    return TEXTURES_CLEAN().exists() and MESHES_CLEAN().exists()
+    return (TEXTURES_CLEAN().exists() and MESHES_CLEAN().exists()
+            and SOUNDS_CLEAN().exists())
 
 
 def _read_list(p: Path) -> list[str]:
@@ -341,6 +391,25 @@ def load_assets() -> list[str]:
 def load_meshes() -> list[str]:
     """Mesh dropdown source: LA_/SM_ static meshes (generated on demand)."""
     return _read_list(MESHES_CLEAN()) if _ensure_clean_lists() else [_NO_GAME]
+
+
+def load_sounds() -> list[str]:
+    """Sound dropdown source: sound-ish base packages (generated on demand)."""
+    return _read_list(SOUNDS_CLEAN()) if _ensure_clean_lists() else [_NO_GAME]
+
+
+def load_all_extractable() -> list[str]:
+    """Every extractable base-pak asset, classified and deduped — the universal
+    Extract source for the base game. Nothing is filtered out; sounds, other cooked
+    assets and (collapsed) localization copies are all included."""
+    try:
+        b = classify_all()
+    except Exception:
+        return [_NO_GAME]
+    out: set = set()
+    for v in b.values():
+        out |= set(v)
+    return sorted(out) if out else [_NO_GAME]
 
 
 # ---------------------------------------------------------------------------
@@ -733,22 +802,45 @@ def decode_pak_preview(pak_path: str, mount: str) -> str | None:
             shutil.rmtree(work, ignore_errors=True)
 
 
+def replace_texture(target_mount: str, user_image: str, out_dir,
+                    spec: "TargetSpec | None" = None) -> str:
+    """THE single texture-replacement primitive — EVERY texture swap in Pak Rat
+    routes through here (regular Texture inject, equipment body/screen, decoration/
+    container material maps, thumbnails). Inject `user_image` into the game texture
+    `target_mount` (inheriting its exact UE dxgi format / dimensions / mips) and
+    write the modified .uasset/.uexp/.ubulk into `out_dir`. Pass an already-prepared
+    `spec` to skip re-extraction (caller then owns spec cleanup); otherwise it
+    extracts and cleans up its own scratch. Returns `out_dir` as a str.
+
+    Staging is the caller's job: copy the sidecars from `out_dir` to the vanilla
+    mount for an in-place OVERRIDE, or relink.clone them to a fresh identity for a
+    CLONE (only-this-item) swap. This keeps ONE inject path with two thin wrappers."""
+    own = spec is None
+    if own:
+        spec = prepare_target(target_mount)
+    try:
+        prepared = prepare_image(user_image, spec)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        _injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
+                   "--version", UE_VERSION, "--save_folder", str(out_dir)])
+        return str(out_dir)
+    finally:
+        if own:
+            cleanup_target(spec)
+
+
 def stage_texture(texture_mount: str, image_path: str, stage_dir, progress=None):
     """Extract a game texture, inject the user's image, and copy the resulting
-    uasset/uexp/ubulk into stage_dir under the texture's mount tree.
-
-    Shared by the texture pipeline and the cooker (so a cooked mesh can ship
-    with its new textures in the same V11 pak). Cleans its own scratch.
-    """
+    uasset/uexp/ubulk into stage_dir under the texture's mount tree (in-place
+    OVERRIDE). Shared by the texture pipeline and the cooker. Cleans its own
+    scratch. Routes the inject through replace_texture (the single primitive)."""
     tex = texture_mount.rstrip("/")
     leaf = tex.split("/")[-1]
     spec = None
     try:
         spec = prepare_target(tex)
-        prepared = prepare_image(image_path, spec)
         injected = Path(spec.work_dir) / "injected"
-        _injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
-                   "--version", UE_VERSION, "--save_folder", str(injected)])
+        replace_texture(tex, image_path, injected, spec=spec)
         rel_parts = tex.split("/")[:-1]
         dst = Path(stage_dir).joinpath(*rel_parts)
         dst.mkdir(parents=True, exist_ok=True)
@@ -781,8 +873,7 @@ def run_pipeline(asset: str, image: ImageInfo, mesh_path: str | None = None,
     # 1. inject the prepared PNG (injector encodes to spec.dxgi_format + mips)
     say("Injecting texture into .uasset…")
     injected = work / "injected"
-    _injector([spec.uasset_path, image.prepared_png, "--mode", "inject",
-               "--version", UE_VERSION, "--save_folder", str(injected)])
+    replace_texture(asset.rstrip("/"), image.prepared_png, injected, spec=spec)
 
     if mesh_path:
         say("Injecting mesh…")
@@ -832,10 +923,8 @@ def run_pipeline_multi(items: list[dict], progress=None) -> str:
             spec = prepare_target(tex)
             specs.append(spec)
             say(f"Injecting {leaf}  ({i}/{n})…")
-            prepared = prepare_image(it["image"], spec)
             injected = Path(spec.work_dir) / "injected"
-            _injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
-                       "--version", UE_VERSION, "--save_folder", str(injected)])
+            replace_texture(tex, it["image"], injected, spec=spec)
             rel_dir = "/".join(tex.split("/")[:-1])
             stage_leaf = stage / rel_dir
             stage_leaf.mkdir(parents=True, exist_ok=True)
@@ -1017,6 +1106,8 @@ def _classify(asset_mount: str) -> str:
         return "texture"
     if leaf.startswith(("LA_", "SM_", "SK_", "SKM_")):
         return "mesh"
+    if _is_sound_mount(asset_mount):
+        return "sound"
     return "other"
 
 

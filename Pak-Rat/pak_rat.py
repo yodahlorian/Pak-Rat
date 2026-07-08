@@ -53,7 +53,7 @@ PAGE_MODE, PAGE_ASSET, PAGE_EXTRACT, PAGE_TEXLIST, PAGE_REQUIRED, PAGE_PROCESS, 
     PAGE_FINISH, PAGE_SETUP, PAGE_COOKINPUT, PAGE_COOKTEX, \
     PAGE_EXTRACTLIST, PAGE_EXTRACTPROG, PAGE_EXTRACTDONE, \
     PAGE_COMBINESRC, PAGE_COMBINESEL, PAGE_ADDINPUT, PAGE_ADDCATEGORY, \
-    PAGE_ADDEXEMPLAR, PAGE_EXTRACTSRC, PAGE_SOUND = range(20)
+    PAGE_ADDEXEMPLAR, PAGE_EXTRACTSRC, PAGE_SOUND, PAGE_INJECTTYPE = range(21)
 
 APP_VERSION = core.APP_VERSION   # single source of truth lives in core.py
 
@@ -469,57 +469,145 @@ class ModePage(QWizardPage):
         self.setTitle("What are you packaging?")
         self.setSubTitle("Choose the type of swap you want to build.")
 
-        self.rb_regular = QRadioButton("Regular Texture")
-        self.rb_cook = QRadioButton("Cook Mesh from a 3D file  (FBX / OBJ / glTF / …)")
-        self.rb_add = QRadioButton("Add Asset  (inject brand-new content)")
         self.rb_extract = QRadioButton("Extract Asset")
+        self.rb_inject = QRadioButton("Inject  (replace a game asset with your own)")
+        self.rb_add = QRadioButton("Add Asset  (inject brand-new content)")
         self.rb_combine = QRadioButton("Combine Mods")
-        self.rb_sound = QRadioButton("Replace Sound  (swap a game sound for your audio)")
-        self.rb_regular.setChecked(True)
+        self.rb_inject.setChecked(True)
 
         self.group = QButtonGroup(self)
-        self.group.addButton(self.rb_regular, 0)
-        self.group.addButton(self.rb_add, 1)
-        self.group.addButton(self.rb_extract, 2)
-        self.group.addButton(self.rb_cook, 3)
-        self.group.addButton(self.rb_combine, 4)
-        self.group.addButton(self.rb_sound, 5)
+        self.group.addButton(self.rb_extract, 0)
+        self.group.addButton(self.rb_inject, 1)
+        self.group.addButton(self.rb_add, 2)
+        self.group.addButton(self.rb_combine, 3)
+        self.group.idToggled.connect(self._on_toggle)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.rb_extract)
-        lab3 = QLabel("    Pull an original mesh or texture out of the game to edit "
-                      "(textures as PNG/DDS, meshes as .uasset). Siblings auto-included.")
-        lab3.setStyleSheet("color:#888;")
-        lab3.setWordWrap(True)
-        lay.addWidget(lab3)
+        lab_ex = QLabel("    Pull an original out of the game to edit — meshes, textures, "
+                        "sounds and any other cooked asset. Siblings auto-included.")
+        lab_ex.setStyleSheet("color:#888;")
+        lab_ex.setWordWrap(True)
+        lay.addWidget(lab_ex)
         lay.addSpacing(12)
-        lay.addWidget(self.rb_regular)
-        lab1 = QLabel("    Swap a single texture (PNG/DDS) on an existing asset.")
-        lab1.setStyleSheet("color:#888;")
-        lay.addWidget(lab1)
+        lay.addWidget(self.rb_inject)
+        lab_in = QLabel("    Swap an existing game asset for your own — pick the type "
+                        "next (texture, 3D model or sound).")
+        lab_in.setStyleSheet("color:#888;")
+        lab_in.setWordWrap(True)
+        lay.addWidget(lab_in)
         lay.addSpacing(12)
-        # Cooker — only meaningful when an Unreal Engine install is present.
-        lay.addWidget(self.rb_cook)
-        self.cook_lab = QLabel("    Bring your own model (any common 3D format) — "
-                               "Pak Rat cooks it with Unreal for you.")
-        self.cook_lab.setStyleSheet("color:#888;")
-        lay.addWidget(self.cook_lab)
-        lay.addSpacing(12)
-        # Add Asset (v3) — cooks the user's model (needs UE 5.4.4, like Cook Mesh)
-        # and registers it natively via relink; no UE4SS.
+        # Add Asset — cooks the user's model and registers it natively via relink
+        # (no UE4SS since v3), so it needs Unreal Engine 5.4.4.
         lay.addWidget(self.rb_add)
-        self.add_lab = QLabel("    Inject a brand-new item (cooked from your model) "
-                              "into the game's catalogue — a true addition, not a swap.")
+        self.add_lab = QLabel("    Inject a brand-new item, cooked from your model, into "
+                              "the game's catalogue — a true addition, not a swap.")
         self.add_lab.setStyleSheet("color:#888;")
         self.add_lab.setWordWrap(True)
         lay.addWidget(self.add_lab)
         lay.addSpacing(12)
         lay.addWidget(self.rb_combine)
-        lab4 = QLabel("    Cherry-pick assets from mods you already have and merge "
-                      "them into one pak.")
-        lab4.setStyleSheet("color:#888;")
-        lab4.setWordWrap(True)
-        lay.addWidget(lab4)
+        lab_cb = QLabel("    Cherry-pick assets from mods you already have and merge "
+                        "them into one pak.")
+        lab_cb.setStyleSheet("color:#888;")
+        lab_cb.setWordWrap(True)
+        lay.addWidget(lab_cb)
+        lay.addStretch(1)
+
+        # Shown when no Unreal Engine is installed: Add Asset is hidden and Inject's
+        # Mesh / Sound options are unavailable until UE 5.4.4 is present. Texture
+        # replacement (a direct swap, no cook) stays available either way.
+        self.cook_note = QLabel("NOTE: Install Unreal Engine 5.4.4 from the Epic Games "
+                                "Launcher to unlock Add Asset and the Mesh / Sound "
+                                "options inside Inject.")
+        self.cook_note.setWordWrap(True)
+        self.cook_note.setStyleSheet("color:#c08a2e; font-style:italic;")
+        self.cook_note.setVisible(False)
+        lay.addWidget(self.cook_note)
+
+    def initializePage(self):
+        self.wizard().mode = "inject"
+        # Add Asset and Inject's Mesh/Sound options cook the user's content, so they
+        # need an installed Unreal Engine; gate them (and show the hint) otherwise.
+        avail = getattr(self.wizard(), "cook_available", None)
+        if avail is None:
+            avail = cook.ue_available()
+            self.wizard().cook_available = avail
+        self.rb_add.setVisible(avail)
+        self.add_lab.setVisible(avail)
+        self.cook_note.setVisible(not avail)
+        try:
+            more = avail and inject.has_additions()
+        except Exception:
+            more = False
+        self.rb_add.setText("Add more assets  (inject brand-new content)" if more
+                            else "Add Asset  (inject brand-new content)")
+        if not avail and self.rb_add.isChecked():
+            self.rb_inject.setChecked(True)
+        self._on_toggle(0, True)
+
+    def _on_toggle(self, _id, checked):
+        if self.rb_add.isChecked():
+            self.wizard().mode = "add"
+        elif self.rb_extract.isChecked():
+            self.wizard().mode = "extract"
+        elif self.rb_combine.isChecked():
+            self.wizard().mode = "combine"
+        else:
+            # Inject: the concrete pipeline is chosen next, on the InjectTypePage.
+            self.wizard().mode = "inject"
+
+    def nextId(self):
+        mode = getattr(self.wizard(), "mode", "inject")
+        # Add Asset's cook path starts at the setup page (short-circuits when the
+        # toolchain is already installed).
+        if mode == "add":
+            return PAGE_SETUP
+        # Combine has no single-asset picker — straight to choosing source paks.
+        if mode == "combine":
+            return PAGE_COMBINESRC
+        # Extract first asks WHERE to pull from (base game vs a ~mods pak).
+        if mode == "extract":
+            return PAGE_EXTRACTSRC
+        # Inject: choose WHAT kind of asset to replace, then route per-type.
+        return PAGE_INJECTTYPE
+
+
+class InjectTypePage(QWizardPage):
+    """Inject step 1 — choose the KIND of asset to replace, then route into the
+    existing per-type pipeline: Texture (direct image swap), Mesh (cook your 3D
+    model over a game mesh) or Sound (cook your audio over a game sound). Mesh and
+    Sound need Unreal Engine 5.4.4; Texture does not."""
+
+    def __init__(self):
+        super().__init__()
+        self.setTitle("What are you replacing?")
+        self.setSubTitle("Pick the kind of game asset to swap for your own.")
+
+        self.rb_tex = QRadioButton("Texture  (an image — PNG / DDS)")
+        self.rb_mesh = QRadioButton("Mesh  (your own 3D model — FBX / OBJ / glTF / …)")
+        self.rb_sound = QRadioButton("Sound  (swap a game sound for your audio)")
+        self.rb_tex.setChecked(True)
+
+        self.group = QButtonGroup(self)
+        self.group.addButton(self.rb_tex, 0)
+        self.group.addButton(self.rb_mesh, 1)
+        self.group.addButton(self.rb_sound, 2)
+        self.group.idToggled.connect(self._on_toggle)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.rb_tex)
+        lab_t = QLabel("    Swap a single texture on an existing game asset with your image.")
+        lab_t.setStyleSheet("color:#888;")
+        lab_t.setWordWrap(True)
+        lay.addWidget(lab_t)
+        lay.addSpacing(12)
+        lay.addWidget(self.rb_mesh)
+        self.mesh_lab = QLabel("    Replace an existing game mesh with your own model — "
+                               "Pak Rat cooks it with Unreal for you.")
+        self.mesh_lab.setStyleSheet("color:#888;")
+        self.mesh_lab.setWordWrap(True)
+        lay.addWidget(self.mesh_lab)
         lay.addSpacing(12)
         lay.addWidget(self.rb_sound)
         self.sound_lab = QLabel("    Replace any game sound (arcade / pinball SFX, UI, "
@@ -529,67 +617,31 @@ class ModePage(QWizardPage):
         lay.addWidget(self.sound_lab)
         lay.addStretch(1)
 
-        # Shown only when no Unreal Engine is installed (cooker hidden then).
-        self.cook_note = QLabel("NOTE: Install Unreal Engine 5.4.4 from the Epic "
-                                "Games Launcher to unlock Mesh Cooking.")
-        self.cook_note.setWordWrap(True)
-        self.cook_note.setStyleSheet("color:#c08a2e; font-style:italic;")
-        self.cook_note.setVisible(False)
-        lay.addWidget(self.cook_note)
-
-        # Retained for layout; Add Asset now shares the cooker's UE 5.4.4 gate, so
-        # cook_note is the single "install Unreal" prompt and this stays hidden.
-        self.add_note = QLabel("NOTE: Add Asset requires Unreal Engine 5.4.4 "
-                               "(same as Mesh Cooking).")
-        self.add_note.setWordWrap(True)
-        self.add_note.setStyleSheet("color:#c08a2e; font-style:italic;")
-        self.add_note.setVisible(False)
-        lay.addWidget(self.add_note)
+        self.ue_note = QLabel("NOTE: Install Unreal Engine 5.4.4 from the Epic Games "
+                              "Launcher to unlock Mesh and Sound replacement.")
+        self.ue_note.setWordWrap(True)
+        self.ue_note.setStyleSheet("color:#c08a2e; font-style:italic;")
+        self.ue_note.setVisible(False)
+        lay.addWidget(self.ue_note)
 
     def initializePage(self):
-        self.wizard().mode = "regular"
-        # The cooker needs an installed Unreal Engine; hide it (and show a hint)
-        # otherwise.
         avail = getattr(self.wizard(), "cook_available", None)
         if avail is None:
             avail = cook.ue_available()
             self.wizard().cook_available = avail
-        self.rb_cook.setVisible(avail)
-        self.cook_lab.setVisible(avail)
-        self.cook_note.setVisible(not avail)
-        if not avail and self.rb_cook.isChecked():
-            self.rb_regular.setChecked(True)
-        # Add Asset cooks the user's model and registers it natively (widget-insert
-        # via relink — no UE4SS since v3), so it needs Unreal Engine 5.4.4, exactly
-        # like Cook Mesh. Gate it on the same cooker availability; cook_note already
-        # prompts to install UE, so no separate Add-Asset note.
-        self.rb_add.setVisible(avail)
-        self.add_lab.setVisible(avail)
-        self.add_note.setVisible(False)
-        try:
-            more = avail and inject.has_additions()
-        except Exception:
-            more = False
-        self.rb_add.setText("Add more assets  (inject brand-new content)" if more
-                            else "Add Asset  (inject brand-new content)")
-        if not avail and self.rb_add.isChecked():
-            self.rb_regular.setChecked(True)
-        # Sound replace cooks the user's audio with Unreal, so it needs UE too.
+        # Mesh + Sound need the cooker; Texture is a direct swap (no UE).
+        self.rb_mesh.setVisible(avail)
+        self.mesh_lab.setVisible(avail)
         self.rb_sound.setVisible(avail)
         self.sound_lab.setVisible(avail)
-        if not avail and self.rb_sound.isChecked():
-            self.rb_regular.setChecked(True)
-        self.group.idToggled.connect(self._on_toggle)
+        self.ue_note.setVisible(not avail)
+        if not avail and (self.rb_mesh.isChecked() or self.rb_sound.isChecked()):
+            self.rb_tex.setChecked(True)
+        self._on_toggle(0, True)
 
     def _on_toggle(self, _id, checked):
-        if self.rb_add.isChecked():
-            self.wizard().mode = "add"
-        elif self.rb_cook.isChecked():
+        if self.rb_mesh.isChecked():
             self.wizard().mode = "cook"
-        elif self.rb_extract.isChecked():
-            self.wizard().mode = "extract"
-        elif self.rb_combine.isChecked():
-            self.wizard().mode = "combine"
         elif self.rb_sound.isChecked():
             self.wizard().mode = "sound"
         else:
@@ -597,17 +649,8 @@ class ModePage(QWizardPage):
 
     def nextId(self):
         mode = getattr(self.wizard(), "mode", "regular")
-        # Cooker path ALWAYS starts at the setup page (step 1). It short-circuits
-        # instantly when the toolchain is already installed.
-        if mode in ("cook", "add"):
+        if mode == "cook":
             return PAGE_SETUP
-        # Combine has no single-asset picker — straight to choosing source paks.
-        if mode == "combine":
-            return PAGE_COMBINESRC
-        # Extract first asks WHERE to pull from (base game vs a ~mods pak).
-        if mode == "extract":
-            return PAGE_EXTRACTSRC
-        # Sound replace: pick a game sound + your audio (its own self-contained page).
         if mode == "sound":
             return PAGE_SOUND
         return PAGE_ASSET
@@ -757,7 +800,11 @@ def extract_source_items(wiz) -> list:
         # via export_any — sounds/other come out as raw cooked sidecars).
         return sorted(set(a["meshes"]) | set(a["textures"])
                       | set(a.get("sounds", [])) | set(a.get("other", [])))
-    return sorted(set(core.load_meshes()) | set(core.load_assets()))
+    # Base game: the FULL classified set — meshes, textures, sounds, other cooked
+    # assets and (collapsed) localization copies. Sounds are no longer filtered out
+    # (they used to be dropped because the base-game path only unioned the _bc /
+    # LA_-SM_ picker lists). Classify, don't block.
+    return core.load_all_extractable()
 
 
 class ExtractSourcePage(QWizardPage):
@@ -3104,16 +3151,20 @@ HELP_TEXT = """
 
 <b>Modes (page 1)</b>
 <ul>
-<li><b>Regular Texture</b> — swap one texture on an existing asset with your image.</li>
-<li><b>Cook Mesh</b> — bring your own 3D model (FBX/OBJ/glTF/…); Pak Rat cooks it with
-    Unreal into a drop-in asset. <i>Needs Unreal Engine 5.4.4.</i></li>
+<li><b>Extract Asset</b> — pull originals out of the game (or a mod) to edit. Everything is
+    surfaced, grouped by type: <b>Meshes, Textures, Sounds</b>, other cooked assets and
+    (collapsed) localization copies.</li>
+<li><b>Inject</b> — replace an existing game asset with your own. Pick the type next:
+    <ul>
+    <li><b>Texture</b> — swap one texture with your image (no Unreal needed).</li>
+    <li><b>Mesh</b> — replace a game mesh with your own 3D model (FBX/OBJ/glTF/…); Pak Rat
+        cooks it with Unreal. <i>Needs UE 5.4.4.</i></li>
+    <li><b>Sound</b> — swap any game sound (arcade / pinball SFX, UI, music) with your audio,
+        cooked in over the original. <i>Needs UE 5.4.4.</i></li>
+    </ul></li>
 <li><b>Add Asset</b> — inject a brand-new catalogue item built from your model — a true
     addition, not a swap. <i>Needs UE 5.4.4.</i></li>
-<li><b>Extract Asset</b> — pull originals out of the game (or a mod) to edit. Handles
-    <b>Meshes, Textures, Sounds</b> and any Other cooked asset.</li>
 <li><b>Combine Mods</b> — cherry-pick assets from mods you already have into one pak.</li>
-<li><b>Replace Sound</b> — swap any game sound (arcade / pinball SFX, UI, music) with your
-    own audio, cooked in over the original. <i>Needs UE 5.4.4.</i></li>
 </ul>
 
 <b>Add Asset — item types</b>
@@ -3136,9 +3187,10 @@ If you leave Normal or Packed Mask blank, Pak Rat fills it with a <b>neutral def
 model can't inherit stale surface detail.
 
 <b>Extract &amp; replace</b><br>
-Extraction is universal — Meshes (as .uasset / geometry), Textures (PNG/DDS), Sounds and any
-other cooked asset come out as files you can edit and re-pack. Sounds throughout the game are
-swappable via <b>Replace Sound</b>.
+Extraction is universal — Meshes, Textures, Sounds and any other cooked asset come out as files
+you can edit and re-pack; identical per-language duplicates are collapsed under "Localization
+copies". Replacing any of them is done through <b>Inject</b>, which routes every texture, mesh
+and sound swap through one consistent path.
 
 <b>Tip</b> — the Help button is on every page. Modes that cook (Cook / Add / Replace Sound)
 appear only when Unreal Engine 5.4.4 is installed.
@@ -3212,6 +3264,7 @@ class PakRatWizard(QWizard):
         self.setPage(PAGE_ADDINPUT, AddInputPage())
         self.setPage(PAGE_EXTRACTSRC, ExtractSourcePage())
         self.setPage(PAGE_SOUND, SoundReplacePage())
+        self.setPage(PAGE_INJECTTYPE, InjectTypePage())
         self.setStartId(PAGE_MODE)
 
         # On the final "Done" page, Back should start the whole flow over at

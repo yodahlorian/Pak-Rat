@@ -598,11 +598,18 @@ def note(m):
     try: open(LOG, "a").write(str(m) + "\n")
     except Exception: pass
 FBX = r"%(fbx)s"; PKG = "%(pkg)s"; NM = "%(name)s"; PLACE = "%(place)s"
+MIS = %(mis)s          # /Game/.../MI paths to retarget the mesh material slots onto
 at = unreal.AssetToolsHelpers.get_asset_tools()
+eal = unreal.EditorAssetLibrary
 try:
+    # Build our OWN material (import_materials=False): the mesh's slots are retargeted
+    # to the game/cloned MIs below via stub MaterialInstanceConstants at those paths,
+    # so the cooked import table resolves to the real (user-reskinned) MI at runtime —
+    # the same stub-retarget trick the mesh-REPLACE cooker uses. This replaces the old
+    # import_materials=True path, whose generic material + textures were never staged.
     opt = unreal.FbxImportUI()
     opt.import_mesh = True; opt.import_as_skeletal = False
-    opt.import_materials = True; opt.import_textures = True
+    opt.import_materials = False; opt.import_textures = False
     opt.mesh_type_to_import = unreal.FBXImportType.FBXIT_STATIC_MESH
     opt.static_mesh_import_data.combine_meshes = True
     opt.static_mesh_import_data.auto_generate_collision = True
@@ -645,6 +652,30 @@ try:
                         mesh, unreal.ScriptingCollisionShapeType.BOX)
             except Exception as e2:
                 note("COLLISION_WARN box " + str(e2))
+        # Retarget the mesh's material slots to the game/cloned MIs. Stub MICs at the
+        # MI paths make the cooked import table reference them; the real reskinned MIs
+        # are staged into the pak at those same paths (inject._stage_mesh_material).
+        if MIS:
+            base = unreal.load_asset("/Engine/BasicShapes/BasicShapeMaterial")
+            mics = []
+            for mi in MIS:
+                pkg = mi.rsplit("/", 1)[0]; name = mi.rsplit("/", 1)[-1]
+                if not eal.does_asset_exist(mi):
+                    m = at.create_asset(name, pkg, unreal.MaterialInstanceConstant,
+                                        unreal.MaterialInstanceConstantFactoryNew())
+                    if base: m.set_editor_property("parent", base)
+                    eal.save_asset(mi, only_if_is_dirty=False)
+                mics.append(unreal.load_asset(mi))
+            slots = mesh.get_editor_property("static_materials")
+            if mics and slots:
+                new = []
+                for i in range(len(slots)):
+                    mic = mics[min(i, len(mics) - 1)]
+                    new.append(unreal.StaticMaterial(material_interface=mic,
+                                                     material_slot_name="Mat%%d" %% i))
+                mesh.set_editor_property("static_materials", new)
+                mesh.modify()
+            note("SLOTS %%d MICS %%d" %% (len(slots), len(mics)))
     unreal.EditorAssetLibrary.save_asset(PKG + "/" + NM, only_if_is_dirty=False)
     note("MESH_DONE " + PKG + "/" + NM)
 except Exception:
@@ -814,9 +845,11 @@ def _clone_container_box(ex: dict, item: str, product_self: str, stage: Path) ->
 
 def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
                     stage: Path, progress=None, placement: str | None = None,
-                    maps: "dict | None" = None) -> int:
-    """Import+cook the user FBX to /Game/.../meshes/<mesh_token> and stage it.
-    Returns files staged (0 => cook produced nothing)."""
+                    mi_paths: "list[str] | None" = None) -> int:
+    """Import+cook the user FBX to /Game/.../meshes/<mesh_token>, retarget its
+    material slots onto `mi_paths` (the game/cloned MIs, staged separately by
+    _stage_mesh_material), and stage the mesh. Returns files staged (0 => cook
+    produced nothing)."""
     log = cook.home() / "inject_cook.log"
     try:
         log.unlink()
@@ -829,16 +862,13 @@ def _cook_user_mesh(env: "cook.CookEnv", fbx: str, mesh_token: str,
     # against the wall (not half-buried) and its collision no longer penetrates.
     if placement == "wall":
         fbx = cook.wall_recenter(env, fbx, progress=progress)
-    # A user material texture-set (base colour / normal / packed-mask) → bake it onto
-    # the mesh material before the UE import. Omitted Normal/RAM were neutral-filled
-    # upstream (_resolve_maps) so the baked material carries no stale map.
-    if maps and (maps.get("bc") or maps.get("n") or maps.get("ram")):
-        fbx = cook.apply_maps(env, fbx, bc=maps.get("bc"), n=maps.get("n"),
-                              ram=maps.get("ram"), progress=progress)
+    # The user's material textures ride on cloned MIs staged upstream
+    # (_stage_mesh_material); the cook retargets the mesh's slots onto them via stub
+    # MICs at those paths — the single texture path, no Blender material bake here.
     script = cook.project_dir() / "pakrat_mesh_import.py"
     script.write_text(_MESH_COOK_SCRIPT % {
         "log": str(log), "fbx": fbx, "pkg": MESH_ROOT, "name": mesh_token,
-        "place": placement or ""},
+        "place": placement or "", "mis": repr(list(mi_paths or []))},
         encoding="utf-8")
     if progress:
         progress(f"Importing mesh '{mesh_token}'…", None)
@@ -990,24 +1020,39 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     bc = mset.get("bc")
     # Equipment (keep_mesh) clones the base machine WHOLE — vanilla mesh + materials,
     # no user model — so there is no FBX to cook. Everything else cooks the user mesh.
-    if not keep_mesh and _cook_user_mesh(
-            env, fbx, mesh, stage, progress=progress,
-            placement=ex.get("placement"), maps=mset) == 0:
-        raise RuntimeError(
-            f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
-            "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
+    if not keep_mesh:
+        # Give the cooked mesh the GAME's material with the USER's textures: clone the
+        # exemplar mesh's MIs, repoint their bc/n/ram/ao to the user's maps (the single
+        # texture path). With no user maps, retarget to the vanilla MIs as-is so the
+        # mesh still wears the real game material (not the default checker).
+        has_maps = bool(mset.get("bc") or mset.get("n") or mset.get("ram"))
+        try:
+            if has_maps:
+                if progress:
+                    progress("Applying your material textures…", None)
+                mi_paths = _stage_mesh_material(ex, item, mset, stage)
+            else:
+                mesh_mount = ex["mesh_path"].replace("/Game/", "RetroRewind/Content/", 1)
+                mi_paths = cook.resolve_mesh_materials(mesh_mount)
+        except Exception as e:
+            if progress:
+                progress(f"Material textures skipped ({e}); using the mesh's own.", None)
+            mi_paths = []
+        if _cook_user_mesh(env, fbx, mesh, stage, progress=progress,
+                           placement=ex.get("placement"), mi_paths=mi_paths) == 0:
+            raise RuntimeError(
+                f"Cook produced no mesh for '{display_name}'. The UE cook step likely "
+                "failed; see inject_cook.log / last_cook.log in the Pak Rat home folder.")
 
     # Custom mesh skin (texture):
-    #  - Decoration/cooked items: a real per-item skin swap is still deferred (bake
-    #    it into your model); just a note, never fatal.
+    #  - Decoration/cooked items: handled above via _stage_mesh_material (game
+    #    material cloned with the user's bc/n/ram) — nothing deferred here anymore.
     #  - Equipment (keep_mesh) WITH colour materials: reskin the body base-colour
     #    texture from the user's image and repoint the cloned colour MIs to it, so
     #    only this new machine is recoloured (the Arcade_D recipe). Best-effort:
     #    a reskin hiccup falls back to the vanilla skin, never fails the add.
     mi_renames: list[str] = []
     if not keep_mesh:
-        # A separate skin image is now baked onto the mesh during the cook
-        # (_cook_user_mesh → cook.apply_skin) — nothing deferred here anymore.
         pass
     else:
         # Equipment body/colour: additive per-item MI reskin where the colour MIs are
@@ -1121,9 +1166,15 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
 def _neutral_png(kind: str, size: "tuple[int, int]", dest: Path) -> Path:
     """Write a NEUTRAL default map PNG so a replaced material never keeps a stale map
     (D3). 'normal' -> flat normal RGB(128,128,255); 'ram' -> packed mask
-    R=roughness(160) / G=AO white(255) / B=metallic(0)."""
+    R=roughness(160) / G=AO white(255) / B=metallic(0); 'ao' -> white(255,255,255)
+    (no occlusion — the exemplar's baked AO is meaningless on the user's mesh)."""
     from PIL import Image
-    color = (128, 128, 255) if kind == "normal" else (160, 255, 0)
+    if kind == "normal":
+        color = (128, 128, 255)
+    elif kind == "ao":
+        color = (255, 255, 255)
+    else:                                   # ram
+        color = (160, 255, 0)
     dest.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (int(size[0]), int(size[1])), color).save(dest)
     return dest
@@ -1138,7 +1189,8 @@ def _resolve_maps(maps: "dict | str | None", stage: Path) -> "dict":
         return {"bc": None, "n": None, "ram": None}
     if isinstance(maps, str):
         maps = {"bc": maps}
-    out = {"bc": maps.get("bc"), "n": maps.get("n"), "ram": maps.get("ram")}
+    out = {"bc": maps.get("bc"), "n": maps.get("n"), "ram": maps.get("ram"),
+           "ao": None}
     # Size the neutrals to the base-colour image when we have one, else a safe 1024².
     size = (1024, 1024)
     if out["bc"]:
@@ -1149,14 +1201,17 @@ def _resolve_maps(maps: "dict | str | None", stage: Path) -> "dict":
         except Exception:
             pass
     if out["bc"] or out["n"] or out["ram"]:
-        # Neutrals are SOURCE images for the bake/inject — write them to a temp dir,
-        # never under `stage` (that would pack the raw PNG into the mod).
+        # Neutrals are SOURCE images for the inject — write them to a temp dir, never
+        # under `stage` (that would pack the raw PNG into the mod). Omitted Normal/RAM
+        # get neutral defaults; AO is ALWAYS neutral (D3 — the exemplar's baked AO is
+        # meaningless on the user's mesh, so we never inherit it).
         import tempfile
         nd = Path(tempfile.mkdtemp(prefix="pakrat_neutral_"))
         if not out["n"]:
             out["n"] = str(_neutral_png("normal", size, nd / "neutral_n.png"))
         if not out["ram"]:
             out["ram"] = str(_neutral_png("ram", size, nd / "neutral_ram.png"))
+        out["ao"] = str(_neutral_png("ao", size, nd / "neutral_ao.png"))
     return out
 
 
@@ -1167,11 +1222,9 @@ def _reskin_and_stage(base_mount: str, user_image: str, new_game_path: str,
     the result to `new_game_path`, and stage it under the pak."""
     spec = core.prepare_target(base_mount)               # extract + read dxgi/WxH
     try:
-        prepared = core.prepare_image(user_image, spec)  # resize to the target WxH
         injected = Path(spec.work_dir) / "reskin"
-        injected.mkdir(parents=True, exist_ok=True)
-        core._injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
-                        "--version", core.UE_VERSION, "--save_folder", str(injected)])
+        # Inject via the single texture-replacement primitive, then re-identity.
+        core.replace_texture(base_mount, user_image, injected, spec=spec)
         injected_ua = injected / f"{old_leaf}.uasset"
         if not injected_ua.is_file():
             raise RuntimeError("injector produced no output texture")
@@ -1250,30 +1303,68 @@ def _stage_equipment_textures(ex: dict, item: str, mset: "dict",
     return renames
 
 
-def _reskin_override(tex: dict, user_image: str, stage: Path) -> None:
-    """Reskin a texture from the user's image and stage it at its OWN vanilla path
-    (a texture override — the PacMan mechanism). Used where the texture is applied by
-    Blueprint/SKU logic rather than a clone-reachable MI (arcade screen, pinball body).
-    Keeps the vanilla identity (no re-path); the pak just supplies new pixels."""
-    base_mount = tex["path"].replace("/Game/", "RetroRewind/Content/", 1)
-    leaf = tex["name"]
-    spec = core.prepare_target(base_mount)                # extract + read dxgi/WxH
-    try:
-        prepared = core.prepare_image(user_image, spec)   # resize to target WxH
-        injected = Path(spec.work_dir) / "override"
-        injected.mkdir(parents=True, exist_ok=True)
-        core._injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
-                        "--version", core.UE_VERSION, "--save_folder", str(injected)])
-        if not (injected / f"{leaf}.uasset").is_file():
-            raise RuntimeError("injector produced no output texture")
-        mount_dir = base_mount.rsplit("/", 1)[0]
+def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path) -> list[str]:
+    """Give a cooked user mesh the GAME's material wearing the USER's textures (the
+    robust texture path). For each material the exemplar's mesh uses: clone it to a
+    per-item identity, and for each of its bc / n / ram / ao texture slots inject the
+    user's matching map (omitted Normal/RAM -> neutral; AO always neutral, D3 — never
+    inherit the exemplar's baked maps). The shared vanilla textures are never touched
+    (clone-mode, via the single texture primitive). Returns the cloned MI /Game paths
+    so the cook can retarget the cooked mesh's material slots onto them."""
+    import tempfile
+    mesh_mount = ex["mesh_path"].replace("/Game/", "RetroRewind/Content/", 1)
+    mis = cook.resolve_mesh_materials(mesh_mount)          # /Game/.../MI paths
+    if not mis:
+        return []
+    base = ex["self_path"].rsplit("/", 2)[0]              # /Game/.../<prop parent>
+    game_dir = f"{base}/{item}"                            # per-item dir
+    slot_img = {"bc": mset.get("bc"), "n": mset.get("n"),
+                "ram": mset.get("ram"), "ao": mset.get("ao")}
+    new_mis: list[str] = []
+    for mi_i, mi_game in enumerate(mis):
+        tmp = Path(tempfile.mkdtemp(prefix="pakrat_mi_"))
+        mi_ua = str(_extract_game_asset(mi_game, tmp))
+        # discover this MI's own texture refs, keyed by suffix (bc/n/ram/ao)
+        tex_refs: dict = {}
+        for ref in core._scan_refs(mi_ua, mi_ua[:-7] + ".uexp"):
+            if core._classify(ref) == "texture":
+                ref_game = cook.mount_to_game(ref)
+                suf = ref_game.rsplit("_", 1)[-1]
+                tex_refs.setdefault(suf, ref_game)
+        # reskin each slot to a per-item texture identity + collect MI rename pairs
+        tex_pairs: list[str] = []
+        for suf, old_game in tex_refs.items():
+            img = slot_img.get(suf)
+            if not img:
+                continue                                  # slot we don't drive
+            old_mount = old_game.replace("/Game/", "RetroRewind/Content/", 1)
+            old_leaf = old_game.rsplit("/", 1)[-1]
+            new_leaf = f"T_{item}_{mi_i:02d}_{suf}"
+            new_tex_game = f"{game_dir}/{new_leaf}"
+            _reskin_and_stage(old_mount, img, new_tex_game, old_leaf, new_leaf, stage)
+            tex_pairs += [old_game, new_tex_game, old_leaf, new_leaf]
+        # clone the MI to a per-item identity, repointing all its driven texture refs
+        new_mi_leaf = f"MI_{item}_{mi_i:02d}"
+        new_mi_game = f"{game_dir}/{new_mi_leaf}"
+        mount_dir = "RetroRewind/Content/" + new_mi_game.rsplit("/", 1)[0][len("/Game/"):]
         dest = stage / Path(*mount_dir.split("/"))
         dest.mkdir(parents=True, exist_ok=True)
-        for f in injected.glob(leaf + ".*"):
-            if f.suffix in (".uasset", ".uexp", ".ubulk"):
-                shutil.copy2(f, dest / f.name)
-    finally:
-        core.cleanup_target(spec)
+        out_ua = dest / f"{new_mi_leaf}.uasset"
+        mi_leaf = mi_game.rsplit("/", 1)[-1]
+        relink.clone(Path(mi_ua), out_ua, mi_game, new_mi_game,
+                     mi_leaf, new_mi_leaf, *tex_pairs)
+        new_mis.append(new_mi_game)
+    return new_mis
+
+
+def _reskin_override(tex: dict, user_image: str, stage: Path) -> None:
+    """OVERRIDE-mode texture swap: inject the user's image and stage it at the
+    texture's OWN vanilla path (the pak globally supplies new pixels — the PacMan
+    mechanism). Used where the texture is applied by Blueprint/SKU logic rather than
+    a clone-reachable MI (arcade screen, pinball body). Delegates to core.stage_texture
+    (the single texture-replacement primitive, in-place)."""
+    base_mount = tex["path"].replace("/Game/", "RetroRewind/Content/", 1)
+    core.stage_texture(base_mount, user_image, stage)
 
 
 def run_add_pipeline(items: list[dict], progress=None, reset: bool = False) -> dict:
