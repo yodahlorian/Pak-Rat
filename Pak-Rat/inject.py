@@ -387,6 +387,13 @@ EXEMPLARS = {
         "class_token": "Couch_C",
         "mesh_path": "/Game/VideoStore/asset/meshes/LA_Chair_A_01",
         "mesh_name": "LA_Chair_A_01",
+        # Material DONOR (discovery ONLY) — a self-contained MI that DIRECTLY owns its
+        # bc/n/ram maps, so the cloned MI carries the user's textures instead of
+        # inheriting LA_Chair_A_01's SHARED material chain (the beta29 texture bug:
+        # the Chair MI owns no direct textures, so _stage_mesh_material found nothing
+        # to repoint and left the clone on shared world textures). Placement + token
+        # lengths still ride mesh_path above; only material discovery uses this.
+        "donor_mesh_path": "/Game/VideoStore/asset/meshes/DECO/LA_DECO_Balloons_Hearts_A_01",
         "cdo_title_key": "Interface_Product_Decoration_Couch",
         "thumb_path": "/Game/VideoStore/asset/prop/decoration/Couch/T_Decoration_Couch_T",
         "thumb_name": "T_Decoration_Couch_T",
@@ -405,6 +412,8 @@ EXEMPLARS = {
         "class_token": "PosterFrame_C",
         "mesh_path": "/Game/VideoStore/asset/meshes/LA_PosterFrame_Big_01",
         "mesh_name": "LA_PosterFrame_Big_01",
+        # Material DONOR (discovery ONLY) — see couch note. Self-contained wall donor.
+        "donor_mesh_path": "/Game/VideoStore/asset/meshes/DECO/LA_DECO_SwordShield_A_01",
         "cdo_title_key": "Interface_Product_Decoration_Frame",
         "thumb_path": "/Game/VideoStore/asset/prop/PosterFrame/T_PosterFrame_01_T",
         "thumb_name": "T_PosterFrame_01_T",
@@ -1030,7 +1039,7 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
             if has_maps:
                 if progress:
                     progress("Applying your material textures…", None)
-                mi_paths = _stage_mesh_material(ex, item, mset, stage)
+                mi_paths = _stage_mesh_material(ex, item, mset, stage, progress=progress)
             else:
                 mesh_mount = ex["mesh_path"].replace("/Game/", "RetroRewind/Content/", 1)
                 mi_paths = cook.resolve_mesh_materials(mesh_mount)
@@ -1303,7 +1312,8 @@ def _stage_equipment_textures(ex: dict, item: str, mset: "dict",
     return renames
 
 
-def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path) -> list[str]:
+def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path,
+                         progress=None) -> list[str]:
     """Give a cooked user mesh the GAME's material wearing the USER's textures (the
     robust texture path). For each material the exemplar's mesh uses: clone it to a
     per-item identity, and for each of its bc / n / ram / ao texture slots inject the
@@ -1312,7 +1322,11 @@ def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path) -> list
     (clone-mode, via the single texture primitive). Returns the cloned MI /Game paths
     so the cook can retarget the cooked mesh's material slots onto them."""
     import tempfile
-    mesh_mount = ex["mesh_path"].replace("/Game/", "RetroRewind/Content/", 1)
+    # Material discovery uses the DONOR mesh (a self-contained material), decoupled
+    # from the placement exemplar's mesh_path. Falls back to mesh_path when no donor
+    # is configured (e.g. exemplars whose own MI already owns its textures).
+    donor_mesh = ex.get("donor_mesh_path", ex["mesh_path"])
+    mesh_mount = donor_mesh.replace("/Game/", "RetroRewind/Content/", 1)
     mis = cook.resolve_mesh_materials(mesh_mount)          # /Game/.../MI paths
     if not mis:
         return []
@@ -1331,6 +1345,20 @@ def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path) -> list
                 ref_game = cook.mount_to_game(ref)
                 suf = ref_game.rsplit("_", 1)[-1]
                 tex_refs.setdefault(suf, ref_game)
+        if progress:
+            progress(f"{mi_game}: discovered texture refs {sorted(tex_refs)}", None)
+        # A self-contained donor MUST directly own its bc/n/ram maps. If it doesn't,
+        # tex_refs/tex_pairs stay empty and the clone would silently inherit the
+        # donor's SHARED material chain (the beta29 bug) — fail loudly instead. The
+        # caller wraps this in try/except -> logs "material skipped" + falls back to
+        # the mesh's own material, so a bad donor never crashes the add.
+        required = {"bc", "n", "ram"}
+        found = set(tex_refs)
+        missing = required - found
+        if missing:
+            raise RuntimeError(
+                f"Donor material {mi_game} is missing direct texture slots: "
+                f"{sorted(missing)}; found {sorted(found)}")
         # reskin each slot to a per-item texture identity + collect MI rename pairs
         tex_pairs: list[str] = []
         for suf, old_game in tex_refs.items():
