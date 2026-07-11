@@ -25,7 +25,7 @@ from pathlib import Path
 # Single source of truth for the app version — pak_rat.py (APP_VERSION) and
 # inject.py (manifest 'version') both read this so the build can't label itself
 # an older beta again (#2: exe reported b6 while shipping b8).
-APP_VERSION = "3.0.0-beta30"
+APP_VERSION = "3.0.0-beta31"
 
 UE_VERSION = "5.4"           # RR is UE 5.4 (verified via injector 'check')
 PAK_VERSION = "V11"
@@ -722,17 +722,19 @@ def validate_image_ext(path: str, allow_lossy: bool = True) -> bool:
     return True
 
 
-def prepare_image(path: str, spec: TargetSpec) -> ImageInfo:
-    """Resize the chosen image to the target's exact WxH (LANCZOS, RGBA).
+def prepare_image(path: str, spec: TargetSpec, preserve_resolution: bool = False) -> ImageInfo:
+    """Prepare the chosen image for texture injection.
 
-    Resolution is LOCKED to the original (decided 2026-06-25). The actual BC
-    encode happens at inject time (injector matches spec.dxgi_format).
+    For normal in-place texture swaps, the source image is resized to the target's original dimensions. For newly cloned per-item textures,
+    ``preserve_resolution=True`` keeps the user image at its native dimensions
+    (for example 4096x4096). The vendored injector supports replacing the texture
+    mip chain and updates the cooked texture metadata to the DDS dimensions.
     """
     from PIL import Image  # lazy: keeps module import light for GUI selftest
     ext = Path(path).suffix.lower()
     out = Path(spec.work_dir) / "replacement.png"
     im = Image.open(path).convert("RGBA")
-    if im.size != (spec.width, spec.height):
+    if not preserve_resolution and im.size != (spec.width, spec.height):
         im = im.resize((spec.width, spec.height), Image.LANCZOS)
     im.save(out)
     return ImageInfo(path=path, ext=ext, encoding=spec.dxgi_format,
@@ -803,7 +805,8 @@ def decode_pak_preview(pak_path: str, mount: str) -> str | None:
 
 
 def replace_texture(target_mount: str, user_image: str, out_dir,
-                    spec: "TargetSpec | None" = None) -> str:
+                    spec: "TargetSpec | None" = None,
+                    preserve_resolution: bool = False) -> str:
     """THE single texture-replacement primitive — EVERY texture swap in Pak Rat
     routes through here (regular Texture inject, equipment body/screen, decoration/
     container material maps, thumbnails). Inject `user_image` into the game texture
@@ -819,7 +822,7 @@ def replace_texture(target_mount: str, user_image: str, out_dir,
     if own:
         spec = prepare_target(target_mount)
     try:
-        prepared = prepare_image(user_image, spec)
+        prepared = prepare_image(user_image, spec, preserve_resolution=preserve_resolution)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         _injector([spec.uasset_path, prepared.prepared_png, "--mode", "inject",
                    "--version", UE_VERSION, "--save_folder", str(out_dir)])

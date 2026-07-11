@@ -385,15 +385,16 @@ EXEMPLARS = {
         "asset": "Couch",
         "self_path": "/Game/VideoStore/asset/prop/decoration/Couch/Couch",
         "class_token": "Couch_C",
+        # This is the mesh reference that actually exists inside the Couch BP and
+        # must be renamed to the newly cooked user mesh.
         "mesh_path": "/Game/VideoStore/asset/meshes/LA_Chair_A_01",
         "mesh_name": "LA_Chair_A_01",
-        # Material DONOR (discovery ONLY) — a self-contained MI that DIRECTLY owns its
-        # bc/n/ram maps, so the cloned MI carries the user's textures instead of
-        # inheriting LA_Chair_A_01's SHARED material chain (the beta29 texture bug:
-        # the Chair MI owns no direct textures, so _stage_mesh_material found nothing
-        # to repoint and left the clone on shared world textures). Placement + token
-        # lengths still ride mesh_path above; only material discovery uses this.
-        "donor_mesh_path": "/Game/VideoStore/asset/meshes/DECO/LA_DECO_Balloons_Hearts_A_01",
+        # Material DONOR (discovery ONLY): a clean, self-contained MI whose params
+        # directly own bc/n/ram. Pak Rat clones this MI per item and rewrites its
+        # Base Color / Normal / RAM texture PARAMETER VALUES to the per-item textures
+        # (full-res, .ubulk preserved). The Chair's parameterized master material
+        # (cross-library textures + Global AO) is deliberately NOT used as the donor.
+        "material_mesh_path": "/Game/VideoStore/asset/meshes/DECO/LA_DECO_Balloons_Hearts_A_01",
         "cdo_title_key": "Interface_Product_Decoration_Couch",
         "thumb_path": "/Game/VideoStore/asset/prop/decoration/Couch/T_Decoration_Couch_T",
         "thumb_name": "T_Decoration_Couch_T",
@@ -410,10 +411,15 @@ EXEMPLARS = {
         "asset": "PosterFrame",
         "self_path": "/Game/VideoStore/asset/prop/PosterFrame/PosterFrame",
         "class_token": "PosterFrame_C",
+        # This is the mesh reference that actually exists inside the PosterFrame BP
+        # and must be renamed to the newly cooked user mesh.
         "mesh_path": "/Game/VideoStore/asset/meshes/LA_PosterFrame_Big_01",
         "mesh_name": "LA_PosterFrame_Big_01",
-        # Material DONOR (discovery ONLY) — see couch note. Self-contained wall donor.
-        "donor_mesh_path": "/Game/VideoStore/asset/meshes/DECO/LA_DECO_SwordShield_A_01",
+        # Material DONOR (discovery ONLY): clean self-contained wall donor whose MI
+        # directly owns bc/n/ram. Cloned + texture PARAMETER VALUES rewritten per item
+        # (full-res, .ubulk preserved). See couch note. NOTE: placement still rides the
+        # PosterFrame BP — wall poster-specific behaviour pending Yodah's wall patch.
+        "material_mesh_path": "/Game/VideoStore/asset/meshes/DECO/LA_DECO_SwordShield_A_01",
         "cdo_title_key": "Interface_Product_Decoration_Frame",
         "thumb_path": "/Game/VideoStore/asset/prop/PosterFrame/T_PosterFrame_01_T",
         "thumb_name": "T_PosterFrame_01_T",
@@ -1035,11 +1041,27 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
         # texture path). With no user maps, retarget to the vanilla MIs as-is so the
         # mesh still wears the real game material (not the default checker).
         has_maps = bool(mset.get("bc") or mset.get("n") or mset.get("ram"))
+        bp_material_renames: list[str] = []
         try:
             if has_maps:
                 if progress:
                     progress("Applying your material textures…", None)
-                mi_paths = _stage_mesh_material(ex, item, mset, stage, progress=progress)
+                mi_paths = _stage_mesh_material(ex, item, mset, stage)
+
+                # The exemplar Blueprint may carry OverrideMaterials entries that
+                # still point at the source mesh's materials.  Those overrides win
+                # over the material slots cooked onto the replacement mesh, so also
+                # repoint every source-material package/object reference in the BP
+                # clone to the corresponding per-item cloned MI.
+                source_mesh_mount = ex["mesh_path"].replace(
+                    "/Game/", "RetroRewind/Content/", 1)
+                source_mis = cook.resolve_mesh_materials(source_mesh_mount)
+                for old_mi, new_mi in zip(source_mis, mi_paths):
+                    bp_material_renames += [
+                        old_mi, new_mi,
+                        old_mi.rsplit("/", 1)[-1],
+                        new_mi.rsplit("/", 1)[-1],
+                    ]
             else:
                 mesh_mount = ex["mesh_path"].replace("/Game/", "RetroRewind/Content/", 1)
                 mi_paths = cook.resolve_mesh_materials(mesh_mount)
@@ -1060,7 +1082,7 @@ def build_added_item(env: "cook.CookEnv", fbx: str, display_name: str,
     #    texture from the user's image and repoint the cloned colour MIs to it, so
     #    only this new machine is recoloured (the Arcade_D recipe). Best-effort:
     #    a reskin hiccup falls back to the vanilla skin, never fails the add.
-    mi_renames: list[str] = []
+    mi_renames: list[str] = list(locals().get("bp_material_renames", []))
     if not keep_mesh:
         pass
     else:
@@ -1224,27 +1246,124 @@ def _resolve_maps(maps: "dict | str | None", stage: Path) -> "dict":
     return out
 
 
+def _fit_token(seed: str, length: int) -> str:
+    """Return a deterministic Unreal-safe token of exactly ``length`` characters."""
+    import hashlib
+    if length < 1:
+        raise RuntimeError("cannot create an empty Unreal name token")
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    token = (seed.replace("-", "_").replace(" ", "_") + "_" + digest)
+    token = "".join(c if (c.isalnum() or c == "_") else "_" for c in token)
+    if not token[0].isalpha() and token[0] != "_":
+        token = "P" + token
+    return (token + "_" * length)[:length]
+
+
+def _length_neutral_texture_identity(old_game: str, item: str,
+                                     mi_i: int, suffix: str) -> tuple[str, str]:
+    """Create a unique package path/object name with the SAME byte lengths as the
+    donor identity.  Equal-length replacement lets us rename the already-injected
+    texture in-place without asking UAssetAPI to reserialize its mip/UBULK data.
+    """
+    old_leaf = old_game.rsplit("/", 1)[-1]
+    leaf = _fit_token(f"T_PR_{item}_{mi_i:02d}_{suffix}", len(old_leaf))
+    # Keep /Game/ and one generated folder.  The folder is padded so the complete
+    # package path has exactly the donor path's ASCII byte length.
+    folder_len = len(old_game) - len("/Game/") - 1 - len(leaf)
+    if folder_len < 1:
+        raise RuntimeError(f"donor texture path is too short to clone safely: {old_game}")
+    folder = _fit_token(f"PakRat_{item}_{mi_i:02d}_{suffix}", folder_len)
+    new_game = f"/Game/{folder}/{leaf}"
+    if len(new_game.encode("ascii")) != len(old_game.encode("ascii")):
+        raise RuntimeError("internal error creating length-neutral texture identity")
+    return new_game, leaf
+
+
+def _replace_equal_length(path: Path, pairs: list[tuple[str, str]]) -> int:
+    """Patch exact ASCII name-map strings without shifting a cooked package.
+    Returns the number of old-string occurrences replaced.
+    """
+    if not path.is_file():
+        return 0
+    data = path.read_bytes()
+    count = 0
+    for old, new in pairs:
+        ob = old.encode("ascii")
+        nb = new.encode("ascii")
+        if len(ob) != len(nb):
+            raise RuntimeError(f"non length-neutral rename: {old!r} -> {new!r}")
+        n = data.count(ob)
+        if n:
+            data = data.replace(ob, nb)
+            count += n
+    path.write_bytes(data)
+    return count
+
+
 def _reskin_and_stage(base_mount: str, user_image: str, new_game_path: str,
-                      old_leaf: str, new_leaf: str, stage: Path) -> None:
-    """Extract `base_mount` from the game, inject `user_image` (the injector WRITES
-    the modified asset into --save_folder, it does not edit in place), re-identity
-    the result to `new_game_path`, and stage it under the pak."""
-    spec = core.prepare_target(base_mount)               # extract + read dxgi/WxH
+                      old_leaf: str, new_leaf: str, stage: Path) -> tuple[str, str]:
+    """Inject first, then rename with LENGTH-NEUTRAL byte edits.
+
+    The proven MI patch worked because it injected the correct pixels and then cloned
+    the texture, but UAssetAPI's clone rewrite discarded the large external mip data,
+    leaving only the donor's 64x64 inline mip.  Cloning before injection preserved
+    mips but broke the material reference.  This version keeps the proven order while
+    avoiding UAssetAPI for the texture package itself: it injects the full-resolution
+    image, copies every sidecar, and edits only equal-length package/object strings.
+    No offsets move and .ubulk is preserved byte-for-byte.
+
+    Returns the actual cloned /Game path and leaf used by the Material Instance.
+    """
+    spec = core.prepare_target(base_mount)
     try:
         injected = Path(spec.work_dir) / "reskin"
-        # Inject via the single texture-replacement primitive, then re-identity.
-        core.replace_texture(base_mount, user_image, injected, spec=spec)
+        core.replace_texture(base_mount, user_image, injected, spec=spec,
+                             preserve_resolution=True)
         injected_ua = injected / f"{old_leaf}.uasset"
         if not injected_ua.is_file():
             raise RuntimeError("injector produced no output texture")
-        mount_dir = "RetroRewind/Content/" + new_game_path.rsplit("/", 1)[0][len("/Game/"):]
+
+        old_game = base_mount.replace("RetroRewind/Content/", "/Game/", 1)
+        # Derive the suffix/index from the requested identity, but generate an alias
+        # whose package and object strings exactly match the donor lengths.
+        try:
+            mi_i = int(new_leaf.rsplit("_", 2)[-2])
+        except Exception:
+            mi_i = 0
+        suffix = new_leaf.rsplit("_", 1)[-1]
+        actual_game, actual_leaf = _length_neutral_texture_identity(
+            old_game, new_leaf, mi_i, suffix)
+
+        mount_dir = "RetroRewind/Content/" + actual_game.rsplit("/", 1)[0][len("/Game/"):]
         dest = stage / Path(*mount_dir.split("/"))
         dest.mkdir(parents=True, exist_ok=True)
-        out_ua = dest / f"{new_leaf}.uasset"
-        old_game = base_mount.replace("RetroRewind/Content/", "/Game/", 1)
-        # a texture has no _C class/CDO -> pass '-' to skip those renames; just repath.
-        relink.clone(injected_ua, out_ua, old_game, new_game_path,
-                     old_leaf, new_leaf, "-", "-")
+
+        copied = []
+        for ext in ("uasset", "uexp", "ubulk", "uptnl"):
+            src = injected / f"{old_leaf}.{ext}"
+            if not src.is_file():
+                continue
+            dst = dest / f"{actual_leaf}.{ext}"
+            shutil.copy2(src, dst)
+            copied.append(ext)
+
+        if "uasset" not in copied:
+            raise RuntimeError("failed to stage cloned texture")
+
+        pairs = [(old_game, actual_game), (old_leaf, actual_leaf)]
+        # Identity strings live in the package/name-map data, not the bulk pixels.
+        # Patch only metadata-bearing files; leave .ubulk/.uptnl untouched.
+        rename_hits = 0
+        for ext in ("uasset", "uexp"):
+            f = dest / f"{actual_leaf}.{ext}"
+            rename_hits += _replace_equal_length(f, pairs)
+        if rename_hits == 0:
+            raise RuntimeError(
+                f"texture identity was not found in {old_leaf}.uasset/.uexp")
+
+        print(f"Pak Rat texture: {old_leaf} -> {actual_leaf}; "
+              f"sidecars={copied}; rename_hits={rename_hits}")
+        return actual_game, actual_leaf
     finally:
         core.cleanup_target(spec)
 
@@ -1312,8 +1431,7 @@ def _stage_equipment_textures(ex: dict, item: str, mset: "dict",
     return renames
 
 
-def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path,
-                         progress=None) -> list[str]:
+def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path) -> list[str]:
     """Give a cooked user mesh the GAME's material wearing the USER's textures (the
     robust texture path). For each material the exemplar's mesh uses: clone it to a
     per-item identity, and for each of its bc / n / ram / ao texture slots inject the
@@ -1322,11 +1440,12 @@ def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path,
     (clone-mode, via the single texture primitive). Returns the cloned MI /Game paths
     so the cook can retarget the cooked mesh's material slots onto them."""
     import tempfile
-    # Material discovery uses the DONOR mesh (a self-contained material), decoupled
-    # from the placement exemplar's mesh_path. Falls back to mesh_path when no donor
-    # is configured (e.g. exemplars whose own MI already owns its textures).
-    donor_mesh = ex.get("donor_mesh_path", ex["mesh_path"])
-    mesh_mount = donor_mesh.replace("/Game/", "RetroRewind/Content/", 1)
+    # The Blueprint's source mesh and the material donor are separate concerns.
+    # `mesh_path` must remain the mesh reference actually present in the cloned BP
+    # so _clone_exemplar can replace it. `material_mesh_path` may point to a cleaner
+    # self-contained asset whose material owns local bc/n/ram textures.
+    material_mesh_path = ex.get("material_mesh_path", ex["mesh_path"])
+    mesh_mount = material_mesh_path.replace("/Game/", "RetroRewind/Content/", 1)
     mis = cook.resolve_mesh_materials(mesh_mount)          # /Game/.../MI paths
     if not mis:
         return []
@@ -1338,27 +1457,23 @@ def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path,
     for mi_i, mi_game in enumerate(mis):
         tmp = Path(tempfile.mkdtemp(prefix="pakrat_mi_"))
         mi_ua = str(_extract_game_asset(mi_game, tmp))
-        # discover this MI's own texture refs, keyed by suffix (bc/n/ram/ao)
+        # Discover the texture-object references stored in the active Material
+        # Instance parameter table.  The Chair uses shared library textures, but
+        # those references still live in MI_Chair_A_01 and must be redirected.
         tex_refs: dict = {}
         for ref in core._scan_refs(mi_ua, mi_ua[:-7] + ".uexp"):
             if core._classify(ref) == "texture":
                 ref_game = cook.mount_to_game(ref)
-                suf = ref_game.rsplit("_", 1)[-1]
-                tex_refs.setdefault(suf, ref_game)
-        if progress:
-            progress(f"{mi_game}: discovered texture refs {sorted(tex_refs)}", None)
-        # A self-contained donor MUST directly own its bc/n/ram maps. If it doesn't,
-        # tex_refs/tex_pairs stay empty and the clone would silently inherit the
-        # donor's SHARED material chain (the beta29 bug) — fail loudly instead. The
-        # caller wraps this in try/except -> logs "material skipped" + falls back to
-        # the mesh's own material, so a bad donor never crashes the add.
-        required = {"bc", "n", "ram"}
-        found = set(tex_refs)
-        missing = required - found
-        if missing:
+                suf = ref_game.rsplit("_", 1)[-1].lower()
+                # Packed maps in this project are normally named *_ram.  Accept a
+                # *_packed alias too so the redirection remains explicit.
+                if suf == "packed":
+                    suf = "ram"
+                if suf in ("bc", "n", "ram", "ao"):
+                    tex_refs.setdefault(suf, ref_game)
+        if not tex_refs:
             raise RuntimeError(
-                f"Donor material {mi_game} is missing direct texture slots: "
-                f"{sorted(missing)}; found {sorted(found)}")
+                f"No Base/Normal/RAM/AO parameter textures were found in {mi_game}")
         # reskin each slot to a per-item texture identity + collect MI rename pairs
         tex_pairs: list[str] = []
         for suf, old_game in tex_refs.items():
@@ -1369,9 +1484,16 @@ def _stage_mesh_material(ex: dict, item: str, mset: "dict", stage: Path,
             old_leaf = old_game.rsplit("/", 1)[-1]
             new_leaf = f"T_{item}_{mi_i:02d}_{suf}"
             new_tex_game = f"{game_dir}/{new_leaf}"
-            _reskin_and_stage(old_mount, img, new_tex_game, old_leaf, new_leaf, stage)
-            tex_pairs += [old_game, new_tex_game, old_leaf, new_leaf]
-        # clone the MI to a per-item identity, repointing all its driven texture refs
+            actual_game, actual_leaf = _reskin_and_stage(
+                old_mount, img, new_tex_game, old_leaf, new_leaf, stage)
+            tex_pairs += [old_game, actual_game, old_leaf, actual_leaf]
+        if not tex_pairs:
+            raise RuntimeError(
+                f"No material texture parameters were redirected in {mi_game}")
+        # Clone the active MI to a per-item identity. relink.clone rewrites both the
+        # imported package path and object leaf for every discovered parameter
+        # texture, which changes the MI parameter values rather than merely creating
+        # unused texture assets.
         new_mi_leaf = f"MI_{item}_{mi_i:02d}"
         new_mi_game = f"{game_dir}/{new_mi_leaf}"
         mount_dir = "RetroRewind/Content/" + new_mi_game.rsplit("/", 1)[0][len("/Game/"):]
